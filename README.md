@@ -149,6 +149,61 @@ conda activate gaussian_splatting
 
 The environment installs the CT native backend from `submodules/ct-native-backend`.
 
+## Environment Configuration
+
+The default environment in [`environment.yml`](/d:/Projects/3.3DGS/SAD-GS/environment.yml) is currently based on:
+
+- Python `3.7.13`
+- PyTorch `1.12.1`
+- CUDA runtime `11.6`
+- `scipy`
+- `scikit-image`
+- `pydicom`
+- `tifffile`
+- `tqdm`
+
+This repository is designed around a CUDA-enabled workflow.
+The current CT training path requires a working GPU environment.
+
+Important practical notes:
+
+- `--ct_backend python` is a Python reference implementation, not a CPU training mode
+- CT training still requires `torch.cuda.is_available() == True`
+- the native backend is built with `torch.utils.cpp_extension.CUDAExtension`
+
+### Native backend build requirements
+
+To build `submodules/ct-native-backend`, you need a usable local CUDA build toolchain in addition to the Conda runtime packages.
+
+Typical requirements:
+
+- an NVIDIA driver that works with your installed PyTorch / CUDA stack
+- a local CUDA toolkit with `nvcc`
+- a C++ compiler supported by your PyTorch CUDA extension toolchain
+
+On Windows, that usually means:
+
+- Visual Studio C++ Build Tools
+- a CUDA toolkit installation compatible with the `cu116`-style environment
+
+### Recommended verification
+
+After activating the environment, verify the basics:
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+python -c "import ct_native_backend._C as C; print('ct_native_backend ok')"
+```
+
+If the native extension is unavailable, the repository can still fall back to the Python backend for some paths, but the main training workflow is still GPU-only.
+
+### Common setup guidance
+
+- Use the provided Conda environment as the baseline instead of mixing unrelated system Python packages
+- Keep the local CUDA toolkit version aligned with the PyTorch extension build path
+- If the native backend fails to compile, verify compiler discovery first, then CUDA toolkit / `nvcc`, then PyTorch CUDA compatibility
+- Large CT volumes also need enough GPU memory and host RAM; environment setup alone is not enough if the machine is too small for the dataset
+
 ## Typical Workflow
 
 ### Phase 1

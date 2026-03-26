@@ -1,32 +1,146 @@
 # CTGS
 
-`CTGS` is a CT-only Gaussian representation pipeline for industrial volume data.
+`CTGS` is a CT-only Gaussian representation repository for industrial volume data.
+It focuses on the full pipeline around CT volumes: ingestion, geometric analysis, hybrid Gaussian modeling, CT-specific training, runtime acceleration, and export to display and analysis formats.
 
-Current workflow:
+This repository is no longer a general SAD-GS / NeRF-style scene training project.
+It is organized around one target problem: turning reconstructed CT volumes into an interactive Gaussian representation that remains useful for inspection, slicing, meshing, and downstream geometric analysis.
 
-1. Phase 1 CT ingestion, segmentation, and geometric analysis
-2. CT-only hybrid Gaussian training
-3. Native CUDA acceleration for CT slice rendering, density query, and KNN refresh
-4. Dual-output export for display GS, mesh, and SDF
+In practical terms, the repository is meant to make CT data easier to:
 
-## What The Current Pipeline Learns
+- compress into a lighter interactive representation
+- display quickly for browsing and inspection
+- export into analysis-oriented geometry formats
 
-The training pipeline is now `void-aware`, not solid-fill by default.
+## Overview
 
-- `material_mask` is the occupancy positive set
-- `void_mask` and exterior voxels are occupancy negatives
-- `foreground_mask` is retained only as a compatibility / ROI mask
-- surface primitives and bulk primitives are both used
-- internal cavities and through-holes are intended to remain visible
+The repository provides:
 
-Primitive semantics:
+- CT volume loading from DICOM, RAW, and TIFF
+- Phase 1 preprocessing and geometry analysis
+- hybrid Gaussian primitives for surface-aware and bulk-aware CT modeling
+- CT-only training with slice supervision and geometric regularization
+- native CUDA acceleration for the main CT training bottlenecks
+- export paths for display GS, mesh, and SDF
 
-- `primitive_type = 0`: anisotropic 3D Gaussian
-- `primitive_type = 1`: planar Gaussian
-- `region_type = 0`: surface primitive
-- `region_type = 1`: bulk primitive
+At a high level, the pipeline is:
 
-## Setup
+1. load a reconstructed CT volume
+2. segment material / void structure and analyze local geometry
+3. initialize a hybrid CT Gaussian model
+4. train the model with CT-specific losses
+5. export the trained representation for viewing or analysis
+
+## Design Goals
+
+CTGS is built around a few practical assumptions:
+
+- CT is not treated like a camera-scene dataset
+- the training target is a volumetric CT field, not RGB novel-view synthesis
+- surface structure matters, but internal material / void structure matters too
+- fast display and geometric analysis do not have to use the exact same output format
+- compact representation and fast browsing are first-class goals, not afterthoughts
+
+This is why the repository keeps:
+
+- a hybrid Gaussian model for interactive representation
+- CT-specific losses instead of image-space GS losses
+- mesh / SDF export for analysis-oriented downstream use
+
+## Repository Layout
+
+Core directories and entrypoints:
+
+- [`ct_pipeline/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline)
+  CT data pipeline modules: loading, preprocessing, geometry analysis, acceleration, compression, exporters, field queries, and backend wrappers
+- [`scene/`](/d:/Projects/3.3DGS/SAD-GS/scene)
+  Gaussian model core and the CT-specific hybrid model
+- [`submodules/ct-native-backend/`](/d:/Projects/3.3DGS/SAD-GS/submodules/ct-native-backend)
+  Native CUDA extension for CT training acceleration
+- [`tests/`](/d:/Projects/3.3DGS/SAD-GS/tests)
+  Regression and smoke tests for the CTGS pipeline
+- [`run_ct_phase1.py`](/d:/Projects/3.3DGS/SAD-GS/run_ct_phase1.py)
+  Standalone Phase 1 ingestion and analysis entrypoint
+- [`train_ct.py`](/d:/Projects/3.3DGS/SAD-GS/train_ct.py)
+  Main CT training entrypoint
+- [`mesher.py`](/d:/Projects/3.3DGS/SAD-GS/mesher.py)
+  CT mesh extraction utility
+
+## Main Components
+
+### 1. CT ingestion and preprocessing
+
+Phase 1 converts a CT dataset into a structured analysis bundle.
+This bundle contains the masks, surface samples, interior samples, and geometric annotations needed by the later training stages.
+
+The current preprocessing path is `void-aware`:
+
+- `material_mask` represents occupied material
+- `void_mask` represents low-density internal or ROI-contained empty regions
+- `foreground_mask` is retained as a coarse ROI / compatibility mask
+
+### 2. Hybrid Gaussian representation
+
+The model combines:
+
+- planar primitives for locally planar surface regions
+- anisotropic 3D primitives for non-planar surface regions and bulk material regions
+
+The model persists CT-specific metadata such as:
+
+- primitive type
+- normals
+- material id
+- planarity
+- region type
+
+### 3. CT-specific training
+
+Training is based on CT slice supervision and geometry-aware regularization rather than camera rendering.
+
+The training loop includes:
+
+- slice consistency loss
+- occupancy supervision
+- point-to-plane regularization
+- normal alignment regularization
+- thickness penalty for planar primitives
+- material boundary regularization
+
+### 4. Native CUDA backend
+
+The repository includes a dedicated CT CUDA backend for the main training bottlenecks.
+This backend is separate from the removed old GS rasterizer stack.
+
+Current native acceleration covers:
+
+- slice patch rendering
+- density query
+- KNN refresh
+- cached point-to-plane operations
+
+### 5. Dual-output export
+
+The trained CTGS model can be exported to different representations depending on the use case:
+
+- display GS for lightweight viewing and compressed distribution
+- mesh for geometry-oriented inspection
+- SDF for downstream analysis workflows
+
+## Rendering And Viewing
+
+This repository does not include a full standalone rendering application or an online viewer service.
+Its role is to produce the CTGS representation and export formats, not to ship a complete end-user visualization product.
+
+In practice, the recommended usage is:
+
+- train and export a lightweight display GS from this repository
+- view that output in an external viewer, custom frontend, or online visualization pipeline
+- use mesh / SDF exports when a pure Gaussian display is not the right downstream format
+
+So the repository should be understood as the CT representation, training, and export stack, not the final viewer itself.
+
+## Installation
 
 ```powershell
 conda env create --file environment.yml
@@ -35,67 +149,24 @@ conda activate gaussian_splatting
 
 The environment installs the CT native backend from `submodules/ct-native-backend`.
 
-## Repository Scope
+## Typical Workflow
 
-Removed from this repository:
-
-- standard SAD-GS / traditional GS train-render-eval entrypoints
-- camera / dataset scene pipeline
-- COLMAP / Replica / Blender style scene loading
-- standard image-space rasterizer training path
-
-Retained compatibility:
-
-- `CTGaussianModel` can still best-effort load older GS PLY / checkpoint payloads and resave them as CT-side hybrid PLYs
-
-## Phase 1: CT Ingestion And Analysis
-
-Run standalone CT ingestion and analysis:
+### Phase 1
 
 ```powershell
 python run_ct_phase1.py ^
   --input D:\path\to\ct_data ^
   --fmt auto ^
-  --output D:\path\to\phase1_out ^
-  --max-material-classes 3
+  --output D:\path\to\phase1_out
 ```
 
 Supported inputs:
 
 - DICOM series directory or representative slice
-- RAW binary volume with JSON sidecar
+- RAW volume with JSON sidecar
 - TIFF stack file or TIFF slice directory
 
-Important Phase 1 behavior:
-
-- global hole filling is disabled
-- material classes are split automatically with `threshold_multiotsu`
-- `void_mask` preserves internal cavities and through-holes inside the object ROI
-- material surfaces are extracted per material label and merged
-
-Main outputs:
-
-- `analysis.npz`
-- `metadata.json`
-
-Important arrays in `analysis.npz`:
-
-- `material_mask`
-- `void_mask`
-- `foreground_mask`
-- `material_label_volume`
-- `surface_points`
-- `surface_material_id`
-- `surface_normals`
-- `interior_points`
-- `interior_density_seed`
-- `interior_material_id`
-
-`foreground_mask` should be treated as a coarse ROI mask only. It is not the occupancy positive set anymore.
-
-## CT Training
-
-Train the hybrid CT Gaussian model:
+### Training
 
 ```powershell
 python train_ct.py ^
@@ -104,13 +175,7 @@ python train_ct.py ^
   --ct_volume_path D:\path\to\ct_data ^
   --ct_volume_format auto ^
   --ct_backend auto ^
-  --ct_material_query_count 4096 ^
-  --ct_void_query_count 4096 ^
-  --ct_exterior_query_count 4096 ^
-  --ct_void_negative_weight 2.0 ^
-  --output_gs D:\path\to\train_out\display.ply ^
-  --output_mesh D:\path\to\train_out\mesh.ply ^
-  --output_sdf D:\path\to\train_out\sdf.npy
+  --output_gs D:\path\to\train_out\display.ply
 ```
 
 Backends:
@@ -119,60 +184,9 @@ Backends:
 - `--ct_backend python`
 - `--ct_backend cuda`
 
-`auto` prefers the native CUDA backend and falls back to the Python backend when the extension is unavailable.
+`auto` prefers the native backend and falls back when it is unavailable.
 
-Training requirements and behavior:
-
-- CUDA is required for the current training implementation
-- SH/color features are frozen; CT training optimizes density geometry only
-- occupancy positives come only from `material_mask`
-- occupancy negatives come from `void_mask` and exterior voxels
-- `--ct_interior_query_count` is retained as a deprecated alias for `--ct_material_query_count`
-
-Useful training flags:
-
-- `--ct_patch_size`
-- `--ct_slice_batch_size`
-- `--ct_neighbor_k`
-- `--ct_neighbor_refresh_interval`
-- `--ct_bulk_points_ratio`
-- `--ct_bulk_boundary_margin_voxels`
-- `--ct_max_material_classes`
-- `--ct_void_negative_weight`
-- `--primitive_harden_iter`
-- `--planar_thickness_max`
-
-## Native CUDA Backend
-
-The native backend is CT-specific and separate from the removed old GS rasterizer stack.
-
-Currently accelerated:
-
-- slice patch render forward / backward
-- occupancy density query
-- KNN neighbor refresh
-- cached point-to-plane target preparation
-- point-to-plane loss application
-
-If the native extension is not available:
-
-- `--ct_backend auto` falls back to Python
-- `--ct_backend cuda` raises an error
-
-## Export
-
-`train_ct.py` can export directly at the end of training:
-
-- display GS `.ply`
-- metrology mesh `.ply`
-- SDF `.npy` with `.json` sidecar
-
-Display export is for interactive viewing and lightweight distribution.
-Mesh and SDF are the analysis-oriented outputs.
-
-## Mesh Extraction
-
-Extract a CT mesh from a saved CTGS point cloud:
+### Mesh extraction
 
 ```powershell
 python mesher.py ^
@@ -183,41 +197,52 @@ python mesher.py ^
   --threshold 0.5
 ```
 
-`--input` may point either to:
+## Outputs
 
-- a training output directory containing `point_cloud/iteration_*/point_cloud.ply`
-- a direct hybrid GS `.ply`
+Phase 1 produces:
 
-`mesher.py` is CT-aware:
+- `analysis.npz`
+- `metadata.json`
 
-- higher-resolution marching cubes over the CTGS density field
-- material-aware vertex labeling
-- local boundary refinement near material transitions
+Training produces:
 
-## Large CT Volumes
+- checkpoints
+- per-iteration point clouds
+- optional display GS export
+- optional mesh export
+- optional SDF export
 
-Full Phase 1 output can be very large for dense CT scans.
-For training, it is often practical to keep:
+## Scope
 
-- full voxel masks and metadata
-- subsampled `surface_points`
-- subsampled `interior_points`
+This repository intentionally does not include the old scene-based SAD-GS stack anymore.
+Removed categories include:
 
-This is the workflow used for the `assets/bunny` smoke runs under `outputs/bunny_smoke`.
+- camera scene loading
+- standard GS train / render / eval scripts
+- COLMAP / Replica / Blender style pipelines
+- the old general-purpose rasterizer training path
+
+What remains is the CTGS stack only.
+
+## Compatibility
+
+`CTGaussianModel` still provides best-effort loading for older GS-style PLY / checkpoint payloads so they can be read and resaved into the CTGS representation.
+That compatibility is limited to model payload handling; the old training and rendering entrypoints are not part of this repository anymore.
 
 ## Tests
 
-Run the CTGS regression suite:
+Run the CTGS regression suite with:
 
 ```powershell
 python -m unittest discover -s tests
 ```
 
-The test suite covers:
+The tests cover:
 
-- Phase 1 loading, segmentation, and geometry analysis
-- hybrid Gaussian persistence and initialization
+- Phase 1 loading and preprocessing
+- geometry analysis
+- hybrid model persistence and initialization
 - CT losses
-- native backend parity and safety
-- CT training smoke runs
+- native backend parity and stability
+- training smoke runs
 - exporter and mesher behavior

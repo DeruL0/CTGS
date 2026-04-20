@@ -21,6 +21,7 @@ def add_ct_optimization_args(parser: ArgumentParser) -> None:
     parser.add_argument("--rotation_lr", type=float, default=0.001)
     parser.add_argument("--percent_dense", type=float, default=0.01)
     parser.add_argument("--primitive_harden_iter", type=int, default=2000)
+    parser.add_argument("--surface_thickness_max", type=float, default=None)
     parser.add_argument("--planar_thickness_max", type=float, default=None)
 
 
@@ -48,5 +49,6 @@ def extract_ct_optimization_args(args) -> SimpleNamespace:
         scaling_lr=float(args.scaling_lr),
         rotation_lr=float(args.rotation_lr),
         primitive_harden_iter=int(args.primitive_harden_iter),
-        planar_thickness_max=args.planar_thickness_max,
+        surface_thickness_max=args.surface_thickness_max if args.surface_thickness_max is not None else args.planar_thickness_max,
+        planar_thickness_max=args.planar_thickness_max if args.planar_thickness_max is not None else args.surface_thickness_max,
     )

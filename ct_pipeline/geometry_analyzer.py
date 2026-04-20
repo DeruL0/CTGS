@@ -60,6 +60,90 @@ class GeometryAnalyzer:
         normals[~valid] = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         return normals.astype(np.float32)
 
+    def estimate_boundary_geometry(
+        self,
+        points: np.ndarray,
+        volume: np.ndarray,
+        spacing: Tuple[float, float, float],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if points.size == 0:
+            empty = np.zeros((0, 3), dtype=np.float32)
+            return empty, empty, empty, np.zeros((0, 1), dtype=np.float32)
+
+        gradients = self._compute_gradients(volume, self.sigma)
+        gradient_normals, gradient_strength = self._sample_boundary_gradients(points, spacing, gradients)
+        sampled_tensors = self._sample_structure_tensor(self.compute_structure_tensor(volume, sigma=self.sigma), points, spacing)
+
+        tangent_u = np.full_like(gradient_normals, np.nan, dtype=np.float32)
+        tangent_v = np.full_like(gradient_normals, np.nan, dtype=np.float32)
+        fallback = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        for index in range(points.shape[0]):
+            normal = gradient_normals[index]
+            if not np.all(np.isfinite(normal)):
+                normal = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
+            eigenvalues, eigenvectors = np.linalg.eigh(sampled_tensors[index])
+            order = np.argsort(eigenvalues)[::-1]
+            tangent_hint = eigenvectors[:, order[1]].astype(np.float32)
+            tangent_hint = tangent_hint - np.dot(tangent_hint, normal) * normal
+            if np.linalg.norm(tangent_hint) <= 1e-6:
+                tangent_hint = fallback.copy()
+                if abs(np.dot(tangent_hint, normal)) > 0.9:
+                    tangent_hint = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                tangent_hint = tangent_hint - np.dot(tangent_hint, normal) * normal
+            tangent_hint /= max(np.linalg.norm(tangent_hint), 1e-6)
+            tangent_binormal = np.cross(normal, tangent_hint)
+            tangent_binormal /= max(np.linalg.norm(tangent_binormal), 1e-6)
+            tangent_hint = np.cross(tangent_binormal, normal)
+            tangent_hint /= max(np.linalg.norm(tangent_hint), 1e-6)
+            tangent_u[index] = tangent_hint
+            tangent_v[index] = tangent_binormal
+
+        return (
+            gradient_normals.astype(np.float32),
+            tangent_u.astype(np.float32),
+            tangent_v.astype(np.float32),
+            gradient_strength.reshape(-1, 1).astype(np.float32),
+        )
+
+    def compute_boundary_target_volumes(
+        self,
+        volume: np.ndarray,
+        material_label_volume: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        material_label_volume = np.asarray(material_label_volume, dtype=np.int32)
+        boundary_mask = self._material_boundary_mask(material_label_volume)
+        if not np.any(boundary_mask):
+            empty_strength = np.zeros_like(volume, dtype=np.float32)
+            empty_normal = np.zeros(volume.shape + (3,), dtype=np.float32)
+            return empty_strength, empty_normal
+
+        gradients = self._compute_gradients(volume, self.sigma)
+        gradient_vectors = np.stack((-gradients["gx"], -gradients["gy"], -gradients["gz"]), axis=-1)
+        gradient_magnitude = np.linalg.norm(gradient_vectors, axis=-1)
+        strength = gradient_magnitude * boundary_mask.astype(np.float32)
+        strength = ndimage.gaussian_filter(strength, sigma=self.sigma).astype(np.float32)
+        normalizer = float(np.percentile(strength[boundary_mask], 99.0)) if np.any(boundary_mask) else 0.0
+        if normalizer <= 1e-6:
+            normalizer = float(np.max(strength))
+        if normalizer <= 1e-6:
+            strength_volume = np.zeros_like(strength, dtype=np.float32)
+        else:
+            strength_volume = np.clip(strength / normalizer, 0.0, 1.0).astype(np.float32)
+
+        gradient_norm = np.linalg.norm(gradient_vectors, axis=-1, keepdims=True)
+        unit_normals = np.zeros_like(gradient_vectors, dtype=np.float32)
+        valid = gradient_norm[..., 0] > 1e-8
+        unit_normals[valid] = (gradient_vectors[valid] / gradient_norm[valid]).astype(np.float32)
+        for channel in range(3):
+            unit_normals[..., channel] *= boundary_mask.astype(np.float32)
+            unit_normals[..., channel] = ndimage.gaussian_filter(unit_normals[..., channel], sigma=self.sigma).astype(np.float32)
+        renorm = np.linalg.norm(unit_normals, axis=-1, keepdims=True)
+        valid = renorm[..., 0] > 1e-8
+        unit_normals[valid] = unit_normals[valid] / renorm[valid]
+        unit_normals[~valid] = 0.0
+        return strength_volume.astype(np.float32), unit_normals.astype(np.float32)
+
     def classify_regions(
         self,
         points: np.ndarray,
@@ -222,6 +306,42 @@ class GeometryAnalyzer:
                 sampled_components.append(self._interpolate_volume(tensor[..., row, col], coords_zyx))
         stacked = np.stack(sampled_components, axis=1).reshape(points.shape[0], 3, 3)
         return stacked.astype(np.float32)
+
+    def _sample_boundary_gradients(self, points: np.ndarray, spacing: Tuple[float, float, float], gradients: Dict[str, np.ndarray]):
+        coords_zyx = self._points_xyz_to_zyx(points, spacing)
+        sampled_gx = self._interpolate_volume(gradients["gx"], coords_zyx)
+        sampled_gy = self._interpolate_volume(gradients["gy"], coords_zyx)
+        sampled_gz = self._interpolate_volume(gradients["gz"], coords_zyx)
+        gradient_xyz = np.stack((-sampled_gx, -sampled_gy, -sampled_gz), axis=1).astype(np.float32)
+        strength = np.linalg.norm(gradient_xyz, axis=1)
+        normalizer = float(np.percentile(strength, 99.0)) if strength.size > 0 else 0.0
+        if normalizer <= 1e-8:
+            normalizer = float(np.max(strength)) if strength.size > 0 else 0.0
+        if normalizer > 1e-8:
+            normalized_strength = np.clip(strength / normalizer, 0.0, 1.0)
+        else:
+            normalized_strength = np.zeros_like(strength, dtype=np.float32)
+
+        norms = np.linalg.norm(gradient_xyz, axis=1, keepdims=True)
+        valid = norms[:, 0] > 1e-8
+        gradient_xyz[valid] = gradient_xyz[valid] / norms[valid]
+        gradient_xyz[~valid] = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        return gradient_xyz.astype(np.float32), normalized_strength.astype(np.float32)
+
+    def _material_boundary_mask(self, material_label_volume: np.ndarray) -> np.ndarray:
+        material_mask = material_label_volume > 0
+        boundary_mask = np.zeros_like(material_mask, dtype=bool)
+        for axis in range(3):
+            slicer_a = [slice(None)] * 3
+            slicer_b = [slice(None)] * 3
+            slicer_a[axis] = slice(1, None)
+            slicer_b[axis] = slice(None, -1)
+            current = material_label_volume[tuple(slicer_a)]
+            previous = material_label_volume[tuple(slicer_b)]
+            change = current != previous
+            boundary_mask[tuple(slicer_a)] |= change & (current > 0)
+            boundary_mask[tuple(slicer_b)] |= change & (previous > 0)
+        return np.logical_and(boundary_mask, material_mask)
 
     def _local_surface_residuals(self, points: np.ndarray, k_neighbors: int = 20) -> np.ndarray:
         if points.shape[0] < 3:

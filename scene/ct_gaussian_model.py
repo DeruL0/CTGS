@@ -8,6 +8,7 @@ from scipy.spatial import cKDTree
 from torch import nn
 
 from ct_pipeline.ct_preprocessor import CTPreprocessor
+from ct_pipeline.geometry_analyzer import GeometryAnalyzer
 from utils.rotation_utils import matrix_to_quaternion
 from .gaussian_model import GaussianModel
 
@@ -60,12 +61,14 @@ class CTGaussianModel(GaussianModel):
     def __init__(self, sh_degree: int):
         super().__init__(sh_degree)
         self.single_material_fallback = False
+        self.surface_thickness_max = None
 
     def create_from_phase1_bundle(
         self,
         analysis_path,
         metadata_path,
         spatial_lr_scale,
+        surface_thickness_max=None,
         planar_thickness_max=None,
         volume=None,
         bulk_points_ratio: float = 1.0,
@@ -79,8 +82,15 @@ class CTGaussianModel(GaussianModel):
             metadata = json.load(handle)
 
         spacing = tuple(float(value) for value in metadata["spacing_zyx"])
-        material_id = analysis["surface_material_id"] if "surface_material_id" in analysis else analysis["material_id"] if "material_id" in analysis else None
         max_material_classes = int(metadata.get("parameters", {}).get("max_material_classes", 3))
+        sigma = float(metadata.get("parameters", {}).get("sigma", 1.0))
+        boundary_points, boundary_normals, boundary_tangent_u, boundary_tangent_v, boundary_strength, boundary_material_id = self._resolve_boundary_samples(
+            analysis,
+            volume=volume,
+            spacing=spacing,
+            sigma=sigma,
+            max_material_classes=max_material_classes,
+        )
         interior_points, interior_density_seed, interior_material_id = self._resolve_interior_samples(
             analysis,
             volume=volume,
@@ -91,19 +101,15 @@ class CTGaussianModel(GaussianModel):
         )
 
         self._create_from_analysis(
-            surface_points=analysis["surface_points"],
-            surface_normals=analysis["surface_normals"],
-            mask_planar=analysis["mask_planar"].astype(bool),
-            mask_edge=analysis["mask_edge"].astype(bool),
-            mask_curved=analysis["mask_curved"].astype(bool),
-            plane_normals=analysis["plane_normals"],
-            plane_tangent_u=analysis["plane_tangent_u"],
-            plane_tangent_v=analysis["plane_tangent_v"],
-            plane_residuals=analysis["plane_residuals"],
+            boundary_points=boundary_points,
+            boundary_normals=boundary_normals,
+            boundary_tangent_u=boundary_tangent_u,
+            boundary_tangent_v=boundary_tangent_v,
+            boundary_strength=boundary_strength,
             spacing=spacing,
             spatial_lr_scale=spatial_lr_scale,
-            planar_thickness_max=planar_thickness_max,
-            material_id=material_id,
+            surface_thickness_max=surface_thickness_max if surface_thickness_max is not None else planar_thickness_max,
+            material_id=boundary_material_id,
             interior_points=interior_points,
             interior_density_seed=interior_density_seed,
             interior_material_id=interior_material_id,
@@ -115,138 +121,122 @@ class CTGaussianModel(GaussianModel):
         spacing,
         analyzer,
         spatial_lr_scale=1.0,
+        surface_thickness_max=None,
         planar_thickness_max=None,
         bulk_points_ratio: float = 1.0,
         bulk_boundary_margin_voxels: int = 2,
         max_material_classes: int = 3,
+        support_threshold_mode: str = "otsu",
+        surface_gradient_percentile: float = 60.0,
     ):
         preprocessor = CTPreprocessor()
-        segmentation = preprocessor.segment_material_void(volume, method="multi_otsu", max_material_classes=max_material_classes)
-        material_mask = segmentation["material_mask"]
-        material_label_volume = segmentation["material_label_volume"]
-        if not np.any(material_mask):
-            raise ValueError("CT volume segmentation produced an empty material mask.")
+        support = preprocessor.segment_coarse_support(volume, threshold_mode=support_threshold_mode)
+        support_mask = support["support_mask"]
+        if not np.any(support_mask):
+            raise ValueError("CT volume support extraction produced an empty solid mask.")
 
-        surface_points, surface_material_id = preprocessor.extract_material_surface_points(material_label_volume, spacing)
-        interior_target_count = max(1, int(round(surface_points.shape[0] * float(bulk_points_ratio))))
-        interior_points, interior_density_seed, interior_material_id = preprocessor.sample_interior_points(
-            material_mask,
+        boundary_points = preprocessor.extract_intensity_surface_points(
+            volume,
+            support_mask,
+            spacing,
+            sigma=float(getattr(analyzer, "sigma", 1.0)),
+            gradient_percentile=surface_gradient_percentile,
+        )
+        boundary_material_id = np.zeros((boundary_points.shape[0], 1), dtype=np.int64)
+        interior_target_count = max(1, int(round(boundary_points.shape[0] * float(bulk_points_ratio))))
+        interior_points, interior_density_seed, interior_material_id = preprocessor.sample_support_points(
+            support_mask,
             volume,
             spacing,
             target_count=interior_target_count,
             boundary_margin_voxels=bulk_boundary_margin_voxels,
-            material_label_volume=material_label_volume,
         )
-        surface_normals = analyzer.estimate_surface_normals(surface_points, volume, spacing)
-        mask_planar, mask_edge, mask_curved = analyzer.classify_regions(surface_points, volume, spacing)
-
-        plane_normals = np.full_like(surface_points, np.nan, dtype=np.float32)
-        plane_tangent_u = np.full_like(surface_points, np.nan, dtype=np.float32)
-        plane_tangent_v = np.full_like(surface_points, np.nan, dtype=np.float32)
-        plane_residuals = np.full((surface_points.shape[0],), np.inf, dtype=np.float32)
-        if np.any(mask_planar):
-            plane_params, residuals = analyzer.fit_local_planes(surface_points[mask_planar], surface_normals[mask_planar], k_neighbors=20)
-            plane_normals[mask_planar] = plane_params["normal"]
-            plane_tangent_u[mask_planar] = plane_params["tangent_u"]
-            plane_tangent_v[mask_planar] = plane_params["tangent_v"]
-            plane_residuals[mask_planar] = residuals
+        boundary_normals, boundary_tangent_u, boundary_tangent_v, boundary_strength = analyzer.estimate_boundary_geometry(
+            boundary_points,
+            volume,
+            spacing,
+        )
 
         self._create_from_analysis(
-            surface_points=surface_points,
-            surface_normals=surface_normals,
-            mask_planar=mask_planar,
-            mask_edge=mask_edge,
-            mask_curved=mask_curved,
-            plane_normals=plane_normals,
-            plane_tangent_u=plane_tangent_u,
-            plane_tangent_v=plane_tangent_v,
-            plane_residuals=plane_residuals,
+            boundary_points=boundary_points,
+            boundary_normals=boundary_normals,
+            boundary_tangent_u=boundary_tangent_u,
+            boundary_tangent_v=boundary_tangent_v,
+            boundary_strength=boundary_strength,
             spacing=spacing,
             spatial_lr_scale=spatial_lr_scale,
-            planar_thickness_max=planar_thickness_max,
-            material_id=surface_material_id,
+            surface_thickness_max=surface_thickness_max if surface_thickness_max is not None else planar_thickness_max,
+            material_id=boundary_material_id,
             interior_points=interior_points,
             interior_density_seed=interior_density_seed,
             interior_material_id=interior_material_id,
         )
 
-    def clamp_planar_thickness(self, max_thickness: float):
+    def clamp_surface_thickness(self, max_thickness: float):
+        self.surface_thickness_max = float(max_thickness)
         self.planar_thickness_max = float(max_thickness)
         if self._scaling.numel() == 0:
             return
 
-        planar_mask = self.get_is_planar.squeeze(-1)
-        if not torch.any(planar_mask):
+        surface_mask = self.get_region_type.squeeze(-1) == 0
+        if not torch.any(surface_mask):
             return
 
         scales = self.scaling_activation(self._scaling.detach())
-        thickness_limit = torch.as_tensor(self.planar_thickness_max, dtype=scales.dtype, device=scales.device)
-        scales[planar_mask, 2] = torch.minimum(scales[planar_mask, 2], thickness_limit)
+        thickness_limit = torch.as_tensor(self.surface_thickness_max, dtype=scales.dtype, device=scales.device)
+        scales[surface_mask, 2] = torch.minimum(scales[surface_mask, 2], thickness_limit)
         clamped = torch.clamp(scales, min=1e-8)
         new_scaling = self.scaling_inverse_activation(clamped)
         self._assign_parameter("_scaling", new_scaling, optimizer_name="scaling", requires_grad=True)
+
+    def clamp_planar_thickness(self, max_thickness: float):
+        self.clamp_surface_thickness(max_thickness)
 
     def get_normals(self) -> torch.Tensor:
         return super().get_normals()
 
     def harden_primitive_types(self):
-        if self._primitive_type.numel() == 0 or self.primitive_types_hardened:
-            return
-
-        hard_mask = torch.sigmoid(self._primitive_type.detach()) >= 0.5
-        hard_logits = torch.where(
-            hard_mask,
-            torch.full_like(self._primitive_type.detach(), self.planar_logit_value),
-            torch.full_like(self._primitive_type.detach(), self.nonplanar_logit_value),
-        )
         self.primitive_types_hardened = True
-        self._assign_parameter("_primitive_type", hard_logits, optimizer_name="primitive_type", requires_grad=False)
         self._freeze_primitive_type_parameter()
 
     def post_optimizer_step(self, iteration):
-        if (not self.primitive_types_hardened) and iteration >= self.primitive_harden_iter:
-            self.harden_primitive_types()
-        if self.planar_thickness_max is not None:
-            self.clamp_planar_thickness(self.planar_thickness_max)
+        del iteration
+        if self.surface_thickness_max is not None:
+            self.clamp_surface_thickness(self.surface_thickness_max)
 
     def _create_from_analysis(
         self,
-        surface_points,
-        surface_normals,
-        mask_planar,
-        mask_edge,
-        mask_curved,
-        plane_normals,
-        plane_tangent_u,
-        plane_tangent_v,
-        plane_residuals,
+        boundary_points,
+        boundary_normals,
+        boundary_tangent_u,
+        boundary_tangent_v,
+        boundary_strength,
         spacing,
         spatial_lr_scale,
-        planar_thickness_max,
+        surface_thickness_max,
         material_id,
         interior_points,
         interior_density_seed,
         interior_material_id,
     ):
-        surface_points = np.asarray(surface_points, dtype=np.float32)
-        surface_normals = np.asarray(surface_normals, dtype=np.float32)
-        mask_planar = np.asarray(mask_planar, dtype=bool)
-        plane_normals = np.asarray(plane_normals, dtype=np.float32)
-        plane_tangent_u = np.asarray(plane_tangent_u, dtype=np.float32)
-        plane_tangent_v = np.asarray(plane_tangent_v, dtype=np.float32)
-        plane_residuals = np.asarray(plane_residuals, dtype=np.float32)
+        boundary_points = np.asarray(boundary_points, dtype=np.float32)
+        boundary_normals = np.asarray(boundary_normals, dtype=np.float32)
+        boundary_tangent_u = np.asarray(boundary_tangent_u, dtype=np.float32)
+        boundary_tangent_v = np.asarray(boundary_tangent_v, dtype=np.float32)
+        boundary_strength = np.asarray(boundary_strength, dtype=np.float32).reshape(-1, 1)
         spacing = tuple(float(value) for value in spacing)
         interior_points = np.asarray(interior_points, dtype=np.float32).reshape(-1, 3)
         interior_density_seed = np.asarray(interior_density_seed, dtype=np.float32).reshape(-1, 1)
         interior_material_id = np.asarray(interior_material_id, dtype=np.int64).reshape(-1, 1)
 
-        num_points = surface_points.shape[0]
+        num_points = boundary_points.shape[0]
         if num_points == 0:
-            raise ValueError("Phase 1 analysis bundle does not contain any surface points.")
+            raise ValueError("Phase 1 analysis bundle does not contain any boundary points.")
 
         self.spatial_lr_scale = spatial_lr_scale
         min_spacing = float(min(spacing))
-        self.planar_thickness_max = float(planar_thickness_max) if planar_thickness_max is not None else 0.5 * min_spacing
+        self.surface_thickness_max = float(surface_thickness_max) if surface_thickness_max is not None else 0.5 * min_spacing
+        self.planar_thickness_max = self.surface_thickness_max
 
         if material_id is None:
             material_id = np.zeros((num_points, 1), dtype=np.int64)
@@ -260,46 +250,36 @@ class CTGaussianModel(GaussianModel):
         elif interior_material_id.shape[0] == 0:
             interior_material_id = np.zeros((interior_points.shape[0], 1), dtype=np.int64)
 
-        nearest_neighbor_distance = self._estimate_nearest_neighbor_distance(surface_points, default_value=min_spacing)
-        local_scales, rotation_matrices = self._estimate_local_gaussian_geometry(
-            surface_points,
-            surface_normals,
-            nearest_neighbor_distance,
-            min_spacing,
-        )
-
-        explicit_normals = surface_normals.copy()
-        planarity = np.zeros((num_points, 1), dtype=np.float32)
-        primitive_logits = np.full((num_points, 1), self.nonplanar_logit_value, dtype=np.float32)
-
-        planar_indices = np.where(mask_planar)[0]
-        for point_index in planar_indices:
-            normal = plane_normals[point_index]
-            tangent_u = plane_tangent_u[point_index]
-            tangent_v = plane_tangent_v[point_index]
-            if not np.all(np.isfinite(normal)):
-                normal = surface_normals[point_index]
-            tangent_u, tangent_v, normal = _build_frame_from_normal(normal, tangent_u)
-            if np.all(np.isfinite(plane_tangent_v[point_index])):
-                tangent_v = plane_tangent_v[point_index]
+        nearest_neighbor_distance = self._estimate_nearest_neighbor_distance(boundary_points, default_value=min_spacing)
+        rotation_matrices = np.zeros((num_points, 3, 3), dtype=np.float32)
+        explicit_normals = np.zeros((num_points, 3), dtype=np.float32)
+        local_scales = np.zeros((num_points, 3), dtype=np.float32)
+        for point_index in range(num_points):
+            tangent_u, tangent_v, normal = _build_frame_from_normal(
+                boundary_normals[point_index],
+                tangent_hint=boundary_tangent_u[point_index],
+            )
+            if np.all(np.isfinite(boundary_tangent_v[point_index])):
+                tangent_v = boundary_tangent_v[point_index]
                 tangent_v = tangent_v - np.dot(tangent_v, normal) * normal
                 tangent_v = _normalize_np(tangent_v)
-                if tangent_v is None:
+                if tangent_v is not None:
+                    tangent_u = _normalize_np(np.cross(tangent_v, normal))
                     tangent_v = _normalize_np(np.cross(normal, tangent_u))
-                tangent_u = _normalize_np(np.cross(tangent_v, normal))
-                tangent_v = _normalize_np(np.cross(normal, tangent_u))
-
+                    tangent_u = tangent_u.astype(np.float32)
+                    tangent_v = tangent_v.astype(np.float32)
             rotation_matrices[point_index] = np.stack((tangent_u, tangent_v, normal), axis=1)
             explicit_normals[point_index] = normal
-            disk_radius = max(float(nearest_neighbor_distance[point_index]), min_spacing)
-            local_scales[point_index, 0] = disk_radius
-            local_scales[point_index, 1] = disk_radius
-            local_scales[point_index, 2] = self.planar_thickness_max
-            primitive_logits[point_index, 0] = self.planar_logit_value
-            planarity[point_index, 0] = 1.0
+            tangential_scale = max(float(nearest_neighbor_distance[point_index]), min_spacing)
+            local_scales[point_index] = np.array(
+                [tangential_scale, tangential_scale, self.surface_thickness_max],
+                dtype=np.float32,
+            )
 
         local_scales = np.clip(local_scales, a_min=min_spacing * 0.25, a_max=None)
-        local_scales[mask_planar, 2] = np.minimum(local_scales[mask_planar, 2], self.planar_thickness_max)
+        local_scales[:, 2] = np.minimum(local_scales[:, 2], self.surface_thickness_max)
+        primitive_logits = np.full((num_points, 1), self.nonplanar_logit_value, dtype=np.float32)
+        planarity = np.zeros((num_points, 1), dtype=np.float32)
 
         bulk_count = interior_points.shape[0]
         if bulk_count > 0:
@@ -321,7 +301,7 @@ class CTGaussianModel(GaussianModel):
             bulk_region_type = np.empty((0, 1), dtype=np.int64)
             bulk_opacity_seed = np.empty((0, 1), dtype=np.float32)
 
-        all_points = np.concatenate((surface_points, interior_points), axis=0)
+        all_points = np.concatenate((boundary_points, interior_points), axis=0)
         all_scales = np.concatenate((local_scales, bulk_scales), axis=0)
         all_rotation_matrices = np.concatenate((rotation_matrices, bulk_rotations), axis=0)
         all_normals = np.concatenate((explicit_normals, bulk_normals), axis=0)
@@ -343,7 +323,10 @@ class CTGaussianModel(GaussianModel):
         features = torch.zeros((total_points, feature_count, 3), dtype=torch.float32, device="cuda")
         features[:, 0, :] = 0.5
 
-        surface_opacities = 0.1 * torch.ones((num_points, 1), dtype=torch.float32, device="cuda")
+        boundary_strength = np.clip(boundary_strength, 0.2, 0.9).astype(np.float32)
+        if not np.any(np.isfinite(boundary_strength)):
+            boundary_strength = np.full((num_points, 1), 0.4, dtype=np.float32)
+        surface_opacities = torch.tensor(boundary_strength, dtype=torch.float32, device="cuda")
         if bulk_count > 0:
             bulk_opacities = torch.tensor(bulk_opacity_seed, dtype=torch.float32, device="cuda")
             opacity_values = torch.cat((surface_opacities, bulk_opacities), dim=0)
@@ -367,8 +350,100 @@ class CTGaussianModel(GaussianModel):
             planarity=torch.tensor(all_planarity, dtype=torch.float32, device="cuda"),
             region_type=torch.tensor(all_region_type, dtype=torch.long, device="cuda"),
         )
+        self.primitive_types_hardened = True
         self.max_radii2D = torch.zeros((total_points,), dtype=torch.float32, device="cuda")
-        self.clamp_planar_thickness(self.planar_thickness_max)
+        self.clamp_surface_thickness(self.surface_thickness_max)
+
+    def _resolve_boundary_samples(self, analysis, volume, spacing, sigma, max_material_classes):
+        if "boundary_points" in analysis and analysis["boundary_points"].size > 0:
+            boundary_points = np.asarray(analysis["boundary_points"], dtype=np.float32).reshape(-1, 3)
+            boundary_normals = np.asarray(analysis["boundary_normals"], dtype=np.float32).reshape(-1, 3)
+            boundary_tangent_u = np.asarray(analysis["boundary_tangent_u"], dtype=np.float32).reshape(-1, 3)
+            boundary_tangent_v = np.asarray(analysis["boundary_tangent_v"], dtype=np.float32).reshape(-1, 3)
+            boundary_strength = np.asarray(analysis["boundary_strength"], dtype=np.float32).reshape(-1, 1)
+            boundary_material_id = np.asarray(analysis["boundary_material_id"], dtype=np.int64).reshape(-1, 1)
+            return (
+                boundary_points,
+                boundary_normals,
+                boundary_tangent_u,
+                boundary_tangent_v,
+                boundary_strength,
+                boundary_material_id,
+            )
+
+        if volume is not None:
+            warnings.warn(
+                "Phase 1 bundle is missing intensity-driven surface seeds; recomputing them from the CT volume.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            preprocessor = CTPreprocessor()
+            analyzer = GeometryAnalyzer(sigma=sigma)
+            if "coarse_support_mask" in analysis:
+                support_mask = np.asarray(analysis["coarse_support_mask"], dtype=bool)
+            elif "material_mask" in analysis:
+                support_mask = np.asarray(analysis["material_mask"], dtype=bool)
+            else:
+                support = preprocessor.segment_coarse_support(
+                    np.asarray(volume, dtype=np.float32),
+                    threshold_mode="otsu",
+                )
+                support_mask = support["support_mask"]
+            boundary_points = preprocessor.extract_intensity_surface_points(
+                np.asarray(volume, dtype=np.float32),
+                support_mask,
+                spacing,
+                sigma=sigma,
+                gradient_percentile=60.0,
+            )
+            boundary_material_id = np.zeros((boundary_points.shape[0], 1), dtype=np.int64)
+            boundary_normals, boundary_tangent_u, boundary_tangent_v, boundary_strength = analyzer.estimate_boundary_geometry(
+                boundary_points,
+                np.asarray(volume, dtype=np.float32),
+                spacing,
+            )
+            return (
+                boundary_points,
+                boundary_normals,
+                boundary_tangent_u,
+                boundary_tangent_v,
+                boundary_strength,
+                boundary_material_id,
+            )
+
+        if "surface_points" in analysis and analysis["surface_points"].size > 0:
+            warnings.warn(
+                "Phase 1 bundle is legacy surface-first data; surface samples are being used as a fallback boundary initialization.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            boundary_points = np.asarray(analysis["surface_points"], dtype=np.float32).reshape(-1, 3)
+            boundary_normals = np.asarray(
+                analysis["surface_normals"] if "surface_normals" in analysis else np.tile(np.array([[0.0, 0.0, 1.0]], dtype=np.float32), (boundary_points.shape[0], 1)),
+                dtype=np.float32,
+            ).reshape(-1, 3)
+            boundary_tangent_u = np.zeros_like(boundary_normals, dtype=np.float32)
+            boundary_tangent_v = np.zeros_like(boundary_normals, dtype=np.float32)
+            for point_index in range(boundary_points.shape[0]):
+                tangent_u, tangent_v, normal = _build_frame_from_normal(boundary_normals[point_index])
+                boundary_normals[point_index] = normal
+                boundary_tangent_u[point_index] = tangent_u
+                boundary_tangent_v[point_index] = tangent_v
+            boundary_strength = np.full((boundary_points.shape[0], 1), 0.5, dtype=np.float32)
+            boundary_material_id = np.asarray(
+                analysis["surface_material_id"] if "surface_material_id" in analysis else analysis["material_id"] if "material_id" in analysis else np.zeros((boundary_points.shape[0], 1), dtype=np.int64),
+                dtype=np.int64,
+            ).reshape(-1, 1)
+            return (
+                boundary_points,
+                boundary_normals,
+                boundary_tangent_u,
+                boundary_tangent_v,
+                boundary_strength,
+                boundary_material_id,
+            )
+
+        raise ValueError("Unable to resolve boundary samples from Phase 1 bundle.")
 
     def _resolve_interior_samples(self, analysis, volume, spacing, bulk_points_ratio, bulk_boundary_margin_voxels, max_material_classes):
         if "interior_points" in analysis and analysis["interior_points"].size > 0:
@@ -399,32 +474,35 @@ class CTGaussianModel(GaussianModel):
                 np.empty((0, 1), dtype=np.int64),
             )
 
-        surface_count = int(np.asarray(analysis["surface_points"]).shape[0])
+        if "boundary_points" in analysis:
+            surface_count = int(np.asarray(analysis["boundary_points"]).shape[0])
+        elif "surface_points" in analysis:
+            surface_count = int(np.asarray(analysis["surface_points"]).shape[0])
+        else:
+            surface_count = 0
         target_count = max(1, int(round(surface_count * float(bulk_points_ratio))))
         preprocessor = CTPreprocessor()
-        if "material_mask" in analysis and "material_label_volume" in analysis:
-            material_mask = np.asarray(analysis["material_mask"], dtype=bool)
-            material_label_volume = np.asarray(analysis["material_label_volume"], dtype=np.int32)
+        if "coarse_support_mask" in analysis:
+            support_mask = np.asarray(analysis["coarse_support_mask"], dtype=bool)
+        elif "material_mask" in analysis:
+            support_mask = np.asarray(analysis["material_mask"], dtype=bool)
         else:
-            segmentation = preprocessor.segment_material_void(
+            support = preprocessor.segment_coarse_support(
                 np.asarray(volume, dtype=np.float32),
-                method="multi_otsu",
-                max_material_classes=max_material_classes,
+                threshold_mode="otsu",
             )
-            material_mask = segmentation["material_mask"]
-            material_label_volume = segmentation["material_label_volume"]
+            support_mask = support["support_mask"]
             warnings.warn(
-                "Phase 1 bundle is legacy surface-only data; material/void masks were recomputed from the CT volume for bulk initialization.",
+                "Phase 1 bundle is legacy surface-only data; coarse solid support was recomputed from the CT volume for bulk initialization.",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        interior_points, interior_density_seed, interior_material_id = preprocessor.sample_interior_points(
-            material_mask,
+        interior_points, interior_density_seed, interior_material_id = preprocessor.sample_support_points(
+            support_mask,
             np.asarray(volume, dtype=np.float32),
             spacing,
             target_count=target_count,
             boundary_margin_voxels=bulk_boundary_margin_voxels,
-            material_label_volume=material_label_volume,
         )
         return interior_points, interior_density_seed, interior_material_id
 

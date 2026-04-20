@@ -28,6 +28,7 @@ def build_training_args():
         scaling_lr=0.005,
         rotation_lr=0.001,
         primitive_harden_iter=2000,
+        surface_thickness_max=None,
         planar_thickness_max=None,
     )
 
@@ -169,16 +170,16 @@ class HybridGaussianModelTests(unittest.TestCase):
         self.assertGreater(float(torch.abs(rotation_matrix[0, 2]).detach()), 0.99)
         self.assertLessEqual(float(scaling[0, 2].detach()), 0.010001)
 
-    def test_ct_model_hardens_primitive_types(self):
+    def test_ct_model_post_step_preserves_nonplanar_active_path(self):
         model = seed_gaussian_core(CTGaussianModel(sh_degree=0))
         model.training_setup(build_training_args())
         model._primitive_type.data[:2] = torch.tensor([[2.0], [-2.0]], device="cuda")
-
+        model._region_type[:, 0] = 0
+        model.surface_thickness_max = 0.03
         model.post_optimizer_step(2000)
-        self.assertTrue(model.primitive_types_hardened)
-        self.assertFalse(model._primitive_type.requires_grad)
-        self.assertGreater(float(model.get_primitive_type_prob[0]), 0.5)
-        self.assertLess(float(model.get_primitive_type_prob[1]), 0.5)
+        self.assertFalse(model.primitive_types_hardened)
+        self.assertTrue(model._primitive_type.requires_grad)
+        self.assertLessEqual(float(model.get_scaling[:, 2].max().detach()), 0.030001)
 
     def test_ct_bundle_initialization_and_ply_roundtrip(self):
         analysis_path, metadata_path = self._write_phase1_bundle()
@@ -186,10 +187,12 @@ class HybridGaussianModelTests(unittest.TestCase):
         model.create_from_phase1_bundle(analysis_path, metadata_path, spatial_lr_scale=1.0)
 
         planar_mask = model.get_is_planar.squeeze(-1)
-        self.assertEqual(int(planar_mask.sum().item()), 2)
-        self.assertTrue(torch.all(model._material_id == 0))
+        self.assertEqual(int(planar_mask.sum().item()), 0)
+        self.assertTrue(torch.all(model._planarity == 0))
         self.assertGreater(int((model.get_region_type == 1).sum().item()), 0)
-        self.assertLessEqual(float(model.get_scaling[planar_mask, 2].max().detach()), model.planar_thickness_max + 1e-6)
+        surface_mask = model.get_region_type.squeeze(-1) == 0
+        self.assertGreater(int(surface_mask.sum().item()), 0)
+        self.assertLessEqual(float(model.get_scaling[surface_mask, 2].max().detach()), model.surface_thickness_max + 1e-6)
 
         ply_path = self.temp_dir / "hybrid.ply"
         model.save_ply(str(ply_path))
@@ -216,7 +219,7 @@ class HybridGaussianModelTests(unittest.TestCase):
     def _write_phase1_bundle(self):
         analysis_path = self.temp_dir / "analysis.npz"
         metadata_path = self.temp_dir / "metadata.json"
-        surface_points = np.array(
+        boundary_points = np.array(
             [
                 [0.0, 0.0, 0.0],
                 [1.0, 0.0, 0.0],
@@ -224,7 +227,7 @@ class HybridGaussianModelTests(unittest.TestCase):
             ],
             dtype=np.float32,
         )
-        surface_normals = np.array(
+        boundary_normals = np.array(
             [
                 [0.0, 0.0, 1.0],
                 [0.0, 0.0, 1.0],
@@ -232,43 +235,36 @@ class HybridGaussianModelTests(unittest.TestCase):
             ],
             dtype=np.float32,
         )
+        boundary_tangent_u = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=np.float32,
+        )
+        boundary_tangent_v = np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
         np.savez_compressed(
             analysis_path,
+            coarse_support_mask=np.ones((2, 2, 2), dtype=bool),
+            support_threshold=np.array([0.5], dtype=np.float32),
             material_mask=np.ones((2, 2, 2), dtype=bool),
             void_mask=np.zeros((2, 2, 2), dtype=bool),
             foreground_mask=np.ones((2, 2, 2), dtype=bool),
             material_label_volume=np.ones((2, 2, 2), dtype=np.int32),
-            surface_points=surface_points,
-            surface_material_id=np.zeros((surface_points.shape[0], 1), dtype=np.int64),
-            surface_normals=surface_normals,
-            mask_planar=np.array([True, True, False]),
-            mask_edge=np.array([False, False, True]),
-            mask_curved=np.array([False, False, False]),
-            plane_normals=np.array(
-                [
-                    [0.0, 0.0, 1.0],
-                    [0.0, 0.0, 1.0],
-                    [np.nan, np.nan, np.nan],
-                ],
-                dtype=np.float32,
-            ),
-            plane_tangent_u=np.array(
-                [
-                    [1.0, 0.0, 0.0],
-                    [1.0, 0.0, 0.0],
-                    [np.nan, np.nan, np.nan],
-                ],
-                dtype=np.float32,
-            ),
-            plane_tangent_v=np.array(
-                [
-                    [0.0, 1.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                    [np.nan, np.nan, np.nan],
-                ],
-                dtype=np.float32,
-            ),
-            plane_residuals=np.array([0.0, 0.0, np.inf], dtype=np.float32),
+            boundary_points=boundary_points,
+            boundary_normals=boundary_normals,
+            boundary_tangent_u=boundary_tangent_u,
+            boundary_tangent_v=boundary_tangent_v,
+            boundary_strength=np.array([[0.9], [0.8], [0.7]], dtype=np.float32),
+            boundary_material_id=np.zeros((boundary_points.shape[0], 1), dtype=np.int64),
             interior_points=np.array([[0.5, 0.5, 0.5]], dtype=np.float32),
             interior_density_seed=np.array([[0.8]], dtype=np.float32),
             interior_material_id=np.array([[0]], dtype=np.int64),

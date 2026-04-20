@@ -17,10 +17,10 @@ In practical terms, the repository is meant to make CT data easier to:
 The repository provides:
 
 - CT volume loading from DICOM, RAW, and TIFF
-- Phase 1 preprocessing and geometry analysis
-- hybrid Gaussian primitives for surface-aware and bulk-aware CT modeling
-- CT-only training with slice supervision and geometric regularization
-- native CUDA acceleration for the main CT training bottlenecks
+- Phase 1 preprocessing and boundary-field analysis
+- boundary-driven surface and bulk Gaussian primitives for CT modeling
+- CT-only training with slice supervision, occupancy supervision, and signed-field boundary regularization
+- native CUDA acceleration for the main CT training bottlenecks, including local-query acceleration
 - export paths for display GS, mesh, and SDF
 
 At a high level, the pipeline is:
@@ -71,27 +71,29 @@ Core directories and entrypoints:
 ### 1. CT ingestion and preprocessing
 
 Phase 1 converts a CT dataset into a structured analysis bundle.
-This bundle contains the masks, surface samples, interior samples, and geometric annotations needed by the later training stages.
+This bundle contains the masks, boundary samples, interior samples, and geometric annotations needed by the later training stages.
 
 The current preprocessing path is `void-aware`:
 
 - `material_mask` represents occupied material
 - `void_mask` represents low-density internal or ROI-contained empty regions
 - `foreground_mask` is retained as a coarse ROI / compatibility mask
+- `boundary_points`, `boundary_normals`, and boundary tangents define the active surface initialization signal
 
 ### 2. Hybrid Gaussian representation
 
-The model combines:
+The current active model combines:
 
-- planar primitives for locally planar surface regions
-- anisotropic 3D primitives for non-planar surface regions and bulk material regions
+- `surface` Gaussians aligned to the material boundary
+- `bulk` Gaussians placed inside material regions
+
+In the active path, surface primitives are anisotropic 3D Gaussians aligned to boundary normals and tangents.
+Bulk primitives are volumetric 3D Gaussians used to preserve material occupancy.
 
 The model persists CT-specific metadata such as:
 
-- primitive type
 - normals
 - material id
-- planarity
 - region type
 
 ### 3. CT-specific training
@@ -102,10 +104,14 @@ The training loop includes:
 
 - slice consistency loss
 - occupancy supervision
-- point-to-plane regularization
-- normal alignment regularization
-- thickness penalty for planar primitives
+- boundary-center regularization
+- boundary-normal regularization
+- signed-surface regularization
+- surface thickness penalty
 - material boundary regularization
+
+The active boundary path is `boundary-driven` rather than marching-cubes surface-first.
+Surface Gaussians are pulled toward the material boundary using cached boundary fields and a signed field derived from the material mask.
 
 ### 4. Native CUDA backend
 
@@ -116,8 +122,12 @@ Current native acceleration covers:
 
 - slice patch rendering
 - density query
+- uniform-grid local-query acceleration for slice and occupancy
 - KNN refresh
-- cached point-to-plane operations
+- cached boundary / signed-field sampling
+
+The active slice and occupancy path no longer scans the full Gaussian set for every pixel or query point.
+Instead, the backend rebuilds a per-iteration uniform grid and evaluates only the local Gaussian subset relevant to the current patch or occupancy query points.
 
 ### 5. Dual-output export
 
@@ -236,10 +246,11 @@ python train_ct.py ^
 Backends:
 
 - `--ct_backend auto`
-- `--ct_backend python`
 - `--ct_backend cuda`
+- `--ct_backend python` for reference / inactive compatibility paths only
 
-`auto` prefers the native backend and falls back when it is unavailable.
+The active signed-field boundary training path is CUDA-only.
+In practice, `auto` is expected to resolve to the native CUDA backend for normal training.
 
 ### Mesh extraction
 

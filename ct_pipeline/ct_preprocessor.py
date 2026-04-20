@@ -18,6 +18,41 @@ class CTSegmentationResult:
 
 
 class CTPreprocessor:
+    def segment_coarse_support(self, volume, threshold_mode: str = "otsu") -> dict:
+        volume = np.asarray(volume, dtype=np.float32)
+        if volume.ndim != 3:
+            raise ValueError("volume must have shape (D, H, W).")
+
+        finite_values = volume[np.isfinite(volume)]
+        if finite_values.size == 0:
+            raise ValueError("volume does not contain finite values.")
+
+        mode = str(threshold_mode).lower()
+        if mode not in {"otsu", "multi_otsu"}:
+            raise ValueError("threshold_mode must be one of {'otsu', 'multi_otsu'}.")
+
+        if mode == "multi_otsu" and finite_values.size >= 8:
+            try:
+                thresholds = threshold_multiotsu(finite_values, classes=3)
+                support_threshold = float(thresholds[0])
+            except ValueError:
+                support_threshold = float(threshold_otsu(finite_values))
+        else:
+            support_threshold = float(threshold_otsu(finite_values))
+
+        support_mask = volume > support_threshold
+        support_mask = self._largest_connected_component(support_mask)
+        roi_bbox = self.compute_roi_bbox(support_mask)
+        roi_mask = self._bbox_mask(support_mask.shape, roi_bbox)
+        air_mask = np.logical_and(roi_mask, np.logical_not(support_mask))
+        return {
+            "support_mask": support_mask.astype(bool),
+            "roi_bbox": roi_bbox.astype(np.int32),
+            "roi_mask": roi_mask.astype(bool),
+            "air_mask": air_mask.astype(bool),
+            "support_threshold": support_threshold,
+        }
+
     def segment_material_void(self, volume, method: str = "multi_otsu", max_material_classes: int = 3) -> dict:
         volume = np.asarray(volume, dtype=np.float32)
         if volume.ndim != 3:
@@ -64,6 +99,72 @@ class CTPreprocessor:
         segmentation = self.segment_material_void(volume, method="multi_otsu", max_material_classes=max_material_classes)
         return segmentation["foreground_mask"]
 
+    def extract_intensity_surface_points(
+        self,
+        volume,
+        support_mask,
+        spacing,
+        sigma: float = 1.0,
+        gradient_percentile: float = 60.0,
+    ):
+        volume = np.asarray(volume, dtype=np.float32)
+        support_mask = np.asarray(support_mask, dtype=bool)
+        if volume.shape != support_mask.shape:
+            raise ValueError("volume and support_mask must have the same shape.")
+        if not np.any(support_mask):
+            return np.empty((0, 3), dtype=np.float32)
+
+        support_label_volume = support_mask.astype(np.int32)
+        boundary_mask = self._material_boundary_mask(support_label_volume)
+        if not np.any(boundary_mask):
+            return np.empty((0, 3), dtype=np.float32)
+
+        smoothed = ndimage.gaussian_filter(volume, sigma=float(max(sigma, 0.0))).astype(np.float32)
+        gz = ndimage.sobel(smoothed, axis=0, mode="nearest").astype(np.float32)
+        gy = ndimage.sobel(smoothed, axis=1, mode="nearest").astype(np.float32)
+        gx = ndimage.sobel(smoothed, axis=2, mode="nearest").astype(np.float32)
+        gradient_magnitude = np.sqrt(gx * gx + gy * gy + gz * gz)
+
+        candidate_values = gradient_magnitude[boundary_mask]
+        if candidate_values.size == 0:
+            filtered_mask = boundary_mask
+        else:
+            percentile = float(np.clip(gradient_percentile, 0.0, 100.0))
+            threshold = float(np.percentile(candidate_values, percentile))
+            filtered_mask = np.logical_and(boundary_mask, gradient_magnitude >= threshold)
+            if not np.any(filtered_mask):
+                filtered_mask = boundary_mask
+
+        filtered_indices = np.argwhere(filtered_mask)
+        points_xyz = np.stack(
+            (
+                (filtered_indices[:, 2].astype(np.float32) + 0.5) * float(spacing[2]),
+                (filtered_indices[:, 1].astype(np.float32) + 0.5) * float(spacing[1]),
+                (filtered_indices[:, 0].astype(np.float32) + 0.5) * float(spacing[0]),
+            ),
+            axis=1,
+        )
+        return points_xyz.astype(np.float32)
+
+    def sample_support_points(
+        self,
+        support_mask,
+        volume,
+        spacing,
+        target_count,
+        boundary_margin_voxels: int = 0,
+    ):
+        support_mask = np.asarray(support_mask, dtype=bool)
+        return self.sample_interior_points(
+            support_mask,
+            volume,
+            spacing,
+            target_count=target_count,
+            boundary_margin_voxels=boundary_margin_voxels,
+            material_label_volume=None,
+            void_mask=None,
+        )
+
     def dilate_boundary(self, mask, width_voxels: int = 3) -> np.ndarray:
         mask = np.asarray(mask, dtype=bool)
         if width_voxels <= 0:
@@ -92,6 +193,34 @@ class CTPreprocessor:
         verts_zyx, _, _, _ = marching_cubes(mask.astype(np.float32), level=0.5, spacing=tuple(float(v) for v in spacing))
         verts_xyz = np.stack((verts_zyx[:, 2], verts_zyx[:, 1], verts_zyx[:, 0]), axis=1)
         return verts_xyz.astype(np.float32)
+
+    def extract_boundary_points(self, material_label_volume, spacing):
+        material_label_volume = np.asarray(material_label_volume, dtype=np.int32)
+        if material_label_volume.ndim != 3:
+            raise ValueError("material_label_volume must have shape (D, H, W).")
+
+        boundary_mask = self._material_boundary_mask(material_label_volume)
+        boundary_indices = np.argwhere(boundary_mask)
+        if boundary_indices.shape[0] == 0:
+            return (
+                np.empty((0, 3), dtype=np.float32),
+                np.empty((0, 1), dtype=np.int64),
+            )
+
+        spacing = tuple(float(value) for value in spacing)
+        points_xyz = np.stack(
+            (
+                (boundary_indices[:, 2].astype(np.float32) + 0.5) * float(spacing[2]),
+                (boundary_indices[:, 1].astype(np.float32) + 0.5) * float(spacing[1]),
+                (boundary_indices[:, 0].astype(np.float32) + 0.5) * float(spacing[0]),
+            ),
+            axis=1,
+        )
+        material_id = np.maximum(
+            material_label_volume[boundary_indices[:, 0], boundary_indices[:, 1], boundary_indices[:, 2]] - 1,
+            0,
+        ).reshape(-1, 1)
+        return points_xyz.astype(np.float32), material_id.astype(np.int64)
 
     def extract_material_surface_points(self, material_label_volume, spacing):
         material_label_volume = np.asarray(material_label_volume, dtype=np.int32)
@@ -127,6 +256,7 @@ class CTPreprocessor:
         target_count,
         boundary_margin_voxels: int = 2,
         material_label_volume=None,
+        void_mask=None,
     ):
         material_mask = np.asarray(material_mask, dtype=bool)
         volume = np.asarray(volume, dtype=np.float32)
@@ -134,6 +264,8 @@ class CTPreprocessor:
             raise ValueError("material_mask and volume must have the same shape.")
         if material_label_volume is not None and np.asarray(material_label_volume).shape != volume.shape:
             raise ValueError("material_label_volume must have the same shape as volume.")
+        if void_mask is not None and np.asarray(void_mask).shape != volume.shape:
+            raise ValueError("void_mask must have the same shape as volume.")
         if target_count < 1 or not np.any(material_mask):
             return (
                 np.empty((0, 3), dtype=np.float32),
@@ -144,6 +276,14 @@ class CTPreprocessor:
         distance = ndimage.distance_transform_edt(material_mask)
         margin = max(int(boundary_margin_voxels), 0)
         candidate_mask = np.logical_and(material_mask, distance >= float(margin))
+        if void_mask is not None and np.any(void_mask):
+            void_mask = np.asarray(void_mask, dtype=bool)
+            void_margin = max(2, margin * 2) if margin > 0 else 2
+            distance_to_void = ndimage.distance_transform_edt(np.logical_not(void_mask))
+            cavity_safe_mask = np.logical_and(material_mask, distance_to_void >= float(void_margin))
+            candidate_mask = np.logical_and(candidate_mask, cavity_safe_mask)
+            if not np.any(candidate_mask):
+                candidate_mask = np.logical_and(material_mask, distance >= float(margin))
         if not np.any(candidate_mask):
             candidate_mask = material_mask
 
@@ -235,3 +375,24 @@ class CTPreprocessor:
         material_label_volume = np.zeros_like(volume, dtype=np.int32)
         material_label_volume[material_candidate] = labels
         return material_label_volume, class_count
+
+    def _material_boundary_mask(self, material_label_volume: np.ndarray) -> np.ndarray:
+        material_label_volume = np.asarray(material_label_volume, dtype=np.int32)
+        material_mask = material_label_volume > 0
+        if not np.any(material_mask):
+            return np.zeros_like(material_mask, dtype=bool)
+
+        boundary_mask = np.zeros_like(material_mask, dtype=bool)
+        for axis in range(3):
+            slicer_a = [slice(None)] * 3
+            slicer_b = [slice(None)] * 3
+            slicer_a[axis] = slice(1, None)
+            slicer_b[axis] = slice(None, -1)
+            current = material_label_volume[tuple(slicer_a)]
+            previous = material_label_volume[tuple(slicer_b)]
+            change = current != previous
+            current_material = current > 0
+            previous_material = previous > 0
+            boundary_mask[tuple(slicer_a)] |= change & current_material
+            boundary_mask[tuple(slicer_b)] |= change & previous_material
+        return np.logical_and(boundary_mask, material_mask)

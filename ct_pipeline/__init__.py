@@ -6,7 +6,7 @@ from .ct_args import (
     extract_ct_optimization_args,
 )
 from .compression import GSCompressor
-from .field_query import density_to_occupancy, query_ct_density, query_ct_density_backend, query_ct_density_python
+from .field_query import density_to_occupancy, query_ct_density, query_ct_density_backend, query_ct_density_from_state, query_ct_density_python
 from .ct_loader import CTVolumeLoader
 from .ct_preprocessor import CTPreprocessor
 from .ct_slice_renderer import (
@@ -21,19 +21,26 @@ from .geometry_analyzer import GeometryAnalyzer
 from .native_backend import (
     build_ct_backend_patch_renderer,
     build_neighbor_index_backend,
+    build_signed_field_backend,
     get_ct_native_backend_error,
     has_ct_native_backend,
+    material_boundary_loss_backend,
+    prepare_ct_training_state,
+    sample_boundary_field_backend,
+    sample_signed_field_backend,
     query_ct_density_backend as query_ct_density_native_backend,
     point_to_plane_loss_backend,
     prepare_point_to_plane_cache_backend,
     resolve_ct_backend,
     render_ct_slice_patch_native,
+    surface_thickness_loss_backend,
 )
 
 __all__ = [
     "build_ct_patch_renderer",
     "build_ct_backend_patch_renderer",
     "build_neighbor_index_backend",
+    "build_signed_field_backend",
     "ClipPlaneManager",
     "CTPatchGridCache",
     "add_ct_model_args",
@@ -52,13 +59,19 @@ __all__ = [
     "OccupancyGrid",
     "point_to_plane_loss_backend",
     "prepare_ct_render_state",
+    "prepare_ct_training_state",
     "prepare_point_to_plane_cache_backend",
     "query_ct_density_backend",
+    "query_ct_density_from_state",
     "query_ct_density_native_backend",
     "query_ct_density_python",
     "query_ct_density",
     "render_ct_slice_patch",
     "render_ct_slice_patch_native",
     "resolve_ct_backend",
+    "sample_boundary_field_backend",
+    "sample_signed_field_backend",
     "sample_gt_slice_patch",
+    "surface_thickness_loss_backend",
+    "material_boundary_loss_backend",
 ]

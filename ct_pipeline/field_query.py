@@ -142,6 +142,45 @@ def query_ct_density_backend(
             scales,
             opacity,
             points_xyz,
+            spatial_grid=None,
+            support_extent=None,
+        )
+
+    return query_ct_density_python(
+        means,
+        rotations,
+        scales,
+        opacity,
+        points_xyz,
+        return_material_volume=False,
+        chunk_size=chunk_size,
+    )
+
+
+def query_ct_density_from_state(
+    backend: str,
+    training_state,
+    points_xyz,
+    chunk_size: int = 32768,
+):
+    means = training_state.xyz
+    points_xyz = _as_query_points(points_xyz, means.dtype, means.device)
+    rotations = training_state.rotation_mats
+    scales = training_state.scales.clamp_min(1e-6)
+    opacity = training_state.opacity
+
+    if backend == "cuda":
+        from ct_pipeline.native_backend import query_ct_density_backend as _query_ct_density_backend_impl
+
+        return _query_ct_density_backend_impl(
+            backend,
+            means,
+            rotations,
+            scales,
+            opacity,
+            points_xyz,
+            spatial_grid=getattr(training_state, "spatial_grid", None),
+            support_extent=getattr(training_state, "support_extent", None),
         )
 
     return query_ct_density_python(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 
@@ -24,6 +24,9 @@ class CTRenderState:
     scales: torch.Tensor
     opacity: torch.Tensor
     radius: torch.Tensor
+    support_extent: Optional[torch.Tensor] = None
+    spatial_grid: Any = None
+    truncation_sigma: float = 4.0
 
     @property
     def device(self) -> torch.device:
@@ -228,7 +231,9 @@ def render_ct_slice_patch(
     gaussians_per_chunk: int = 2048,
     patch_grid_cache: Optional[CTPatchGridCache] = None,
     render_impl: Optional[Callable[..., torch.Tensor]] = None,
+    slice_tile_size: int = 8,
 ):
+    del slice_tile_size
     axis_index = _normalize_axis(axis)
     slice_shape_hw = _slice_shape(volume_shape_dhw, axis_index)
     patch_origin_hw, patch_size_hw = _normalize_patch_parameters(patch_origin_hw, patch_size_hw, slice_shape_hw)

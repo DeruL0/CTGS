@@ -221,6 +221,13 @@ class CTPreprocessorTests(unittest.TestCase):
         overlap = np.logical_and(mask, self.true_mask).sum()
         self.assertGreater(overlap / float(self.true_mask.sum()), 0.98)
 
+    def test_segment_coarse_support_recovers_main_solid_region(self):
+        support = self.preprocessor.segment_coarse_support(self.volume, threshold_mode="otsu")
+        self.assertTrue(np.any(support["support_mask"]))
+        overlap = np.logical_and(support["support_mask"], self.true_mask).sum()
+        self.assertGreater(overlap / float(self.true_mask.sum()), 0.98)
+        self.assertIn("support_threshold", support)
+
     def test_boundary_band_is_exterior_dilation(self):
         boundary = self.preprocessor.dilate_boundary(self.true_mask, width_voxels=2)
         expected = np.logical_and(
@@ -241,6 +248,17 @@ class CTPreprocessorTests(unittest.TestCase):
         self.assertAlmostEqual(y_max, (18 - 0.5) * self.spacing[1], places=4)
         self.assertAlmostEqual(z_min, (5 - 0.5) * self.spacing[0], places=4)
         self.assertAlmostEqual(z_max, (19 - 0.5) * self.spacing[0], places=4)
+
+    def test_extract_intensity_surface_points_returns_boundary_band_samples(self):
+        support = self.preprocessor.segment_coarse_support(self.volume, threshold_mode="otsu")
+        points = self.preprocessor.extract_intensity_surface_points(
+            self.volume,
+            support["support_mask"],
+            self.spacing,
+            sigma=1.0,
+            gradient_percentile=50.0,
+        )
+        self.assertGreater(points.shape[0], 0)
 
     def test_sample_interior_points_stay_inside_foreground_and_keep_density_seed(self):
         points, density_seed, material_id = self.preprocessor.sample_interior_points(
@@ -307,6 +325,43 @@ class CTPreprocessorTests(unittest.TestCase):
         )
         self.assertGreater(points.shape[0], 0)
         self.assertGreaterEqual(np.unique(material_id).size, 2)
+
+    def test_sample_interior_points_avoid_cavity_wall_when_void_mask_is_available(self):
+        from scipy import ndimage
+
+        volume = create_hollow_cube_volume()
+        segmentation = self.preprocessor.segment_material_void(volume, max_material_classes=3)
+        points, _, _ = self.preprocessor.sample_interior_points(
+            segmentation["material_mask"],
+            volume,
+            spacing=(1.0, 1.0, 1.0),
+            target_count=64,
+            boundary_margin_voxels=1,
+            material_label_volume=segmentation["material_label_volume"],
+            void_mask=segmentation["void_mask"],
+        )
+        self.assertGreater(points.shape[0], 0)
+
+        distance_to_void = ndimage.distance_transform_edt(np.logical_not(segmentation["void_mask"]))
+        voxel_x = np.floor(points[:, 0]).astype(np.int32)
+        voxel_y = np.floor(points[:, 1]).astype(np.int32)
+        voxel_z = np.floor(points[:, 2]).astype(np.int32)
+        sampled_distance = distance_to_void[voxel_z, voxel_y, voxel_x]
+        self.assertTrue(np.all(sampled_distance >= 2.0))
+
+    def test_extract_boundary_points_returns_material_side_samples(self):
+        volume = create_hollow_cube_volume()
+        segmentation = self.preprocessor.segment_material_void(volume, max_material_classes=3)
+        points, boundary_material_id = self.preprocessor.extract_boundary_points(
+            segmentation["material_label_volume"],
+            self.spacing,
+        )
+        self.assertGreater(points.shape[0], 0)
+        self.assertEqual(points.shape[0], boundary_material_id.shape[0])
+        voxel_x = np.floor(points[:, 0] / self.spacing[2]).astype(np.int32)
+        voxel_y = np.floor(points[:, 1] / self.spacing[1]).astype(np.int32)
+        voxel_z = np.floor(points[:, 2] / self.spacing[0]).astype(np.int32)
+        self.assertTrue(np.all(segmentation["material_mask"][voxel_z, voxel_y, voxel_x]))
 
 
 class GeometryAnalyzerTests(unittest.TestCase):
@@ -382,6 +437,33 @@ class GeometryAnalyzerTests(unittest.TestCase):
         valid_normals = plane_params["normal"][np.isfinite(residuals)]
         self.assertGreater(np.mean(np.abs(valid_normals[:, 0])), 0.85)
 
+    def test_boundary_geometry_estimation_returns_normals_tangents_and_strength(self):
+        volume = create_hollow_cube_volume()
+        spacing = (1.0, 1.0, 1.0)
+        segmentation = self.preprocessor.segment_material_void(volume, max_material_classes=3)
+        points, _ = self.preprocessor.extract_boundary_points(segmentation["material_label_volume"], spacing)
+        analyzer = GeometryAnalyzer(sigma=1.0)
+        normals, tangent_u, tangent_v, strength = analyzer.estimate_boundary_geometry(points, volume, spacing)
+
+        self.assertEqual(points.shape, normals.shape)
+        self.assertEqual(points.shape, tangent_u.shape)
+        self.assertEqual(points.shape, tangent_v.shape)
+        self.assertEqual(strength.shape[0], points.shape[0])
+        self.assertTrue(np.all(np.isfinite(normals)))
+        self.assertTrue(np.all(np.isfinite(tangent_u)))
+        self.assertTrue(np.all(np.isfinite(tangent_v)))
+        self.assertGreater(np.mean(np.linalg.norm(normals, axis=1)), 0.9)
+
+    def test_boundary_target_volumes_are_nonempty_on_hollow_cube(self):
+        volume = create_hollow_cube_volume()
+        segmentation = self.preprocessor.segment_material_void(volume, max_material_classes=3)
+        analyzer = GeometryAnalyzer(sigma=1.0)
+        strength_volume, normal_volume = analyzer.compute_boundary_target_volumes(volume, segmentation["material_label_volume"])
+
+        self.assertEqual(strength_volume.shape, volume.shape)
+        self.assertEqual(normal_volume.shape, volume.shape + (3,))
+        self.assertGreater(float(strength_volume.max()), 0.0)
+
 
 class RunCTPhase1Tests(unittest.TestCase):
     def setUp(self):
@@ -447,10 +529,17 @@ class RunCTPhase1Tests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         with np.load(str(output_dir / "analysis.npz")) as analysis:
+            self.assertIn("coarse_support_mask", analysis.files)
+            self.assertIn("support_threshold", analysis.files)
             self.assertIn("material_mask", analysis.files)
             self.assertIn("void_mask", analysis.files)
             self.assertIn("material_label_volume", analysis.files)
-            self.assertIn("surface_material_id", analysis.files)
+            self.assertIn("boundary_points", analysis.files)
+            self.assertIn("boundary_normals", analysis.files)
+            self.assertIn("boundary_tangent_u", analysis.files)
+            self.assertIn("boundary_tangent_v", analysis.files)
+            self.assertIn("boundary_strength", analysis.files)
+            self.assertIn("boundary_material_id", analysis.files)
             self.assertIn("interior_points", analysis.files)
             self.assertIn("interior_density_seed", analysis.files)
             self.assertIn("interior_material_id", analysis.files)

@@ -43,6 +43,7 @@ class GaussianModel:
         self.primitive_harden_iter = 2000
         self.primitive_types_hardened = False
         self.planar_thickness_max = None
+        self.surface_thickness_max = None
         self.planar_logit_value = 8.0
         self.nonplanar_logit_value = -8.0
         self.setup_functions()
@@ -216,6 +217,7 @@ class GaussianModel:
             self.primitive_harden_iter = 2000
             self.primitive_types_hardened = False
             self.planar_thickness_max = None
+            self.surface_thickness_max = None
             self._initialize_hybrid_metadata(
                 self._xyz.shape[0],
                 self._xyz.device,
@@ -243,6 +245,7 @@ class GaussianModel:
                 self.primitive_types_hardened,
                 self.planar_thickness_max,
             ) = model_args
+            self.surface_thickness_max = self.planar_thickness_max
             self._region_type = torch.zeros_like(self._material_id, dtype=torch.long, device=self._material_id.device)
         else:
             (
@@ -267,6 +270,7 @@ class GaussianModel:
                 self.primitive_types_hardened,
                 self.planar_thickness_max,
             ) = model_args
+            self.surface_thickness_max = self.planar_thickness_max
 
         if training_args is not None:
             self.training_setup(training_args)
@@ -284,12 +288,24 @@ class GaussianModel:
     @property
     def get_scaling(self):
         scaling = self.scaling_activation(self._scaling)
-        planar_mask = self.get_is_planar.squeeze(-1) if self._primitive_type.numel() > 0 else torch.zeros((0,), dtype=torch.bool, device=scaling.device)
-        if self.planar_thickness_max is None or scaling.numel() == 0 or not torch.any(planar_mask):
+        if scaling.numel() == 0:
             return scaling
+
+        planar_mask = self.get_is_planar.squeeze(-1) if self._primitive_type.numel() > 0 else torch.zeros((scaling.shape[0],), dtype=torch.bool, device=scaling.device)
+        surface_mask = self.get_region_type.squeeze(-1) == 0 if self._region_type.numel() > 0 else torch.zeros((scaling.shape[0],), dtype=torch.bool, device=scaling.device)
+        if (
+            (self.planar_thickness_max is None or not torch.any(planar_mask))
+            and (self.surface_thickness_max is None or not torch.any(surface_mask))
+        ):
+            return scaling
+
         scaling = scaling.clone()
-        thickness_limit = torch.as_tensor(self.planar_thickness_max, dtype=scaling.dtype, device=scaling.device)
-        scaling[planar_mask, 2] = torch.minimum(scaling[planar_mask, 2], thickness_limit)
+        if self.planar_thickness_max is not None and torch.any(planar_mask):
+            planar_limit = torch.as_tensor(self.planar_thickness_max, dtype=scaling.dtype, device=scaling.device)
+            scaling[planar_mask, 2] = torch.minimum(scaling[planar_mask, 2], planar_limit)
+        if self.surface_thickness_max is not None and torch.any(surface_mask):
+            surface_limit = torch.as_tensor(self.surface_thickness_max, dtype=scaling.dtype, device=scaling.device)
+            scaling[surface_mask, 2] = torch.minimum(scaling[surface_mask, 2], surface_limit)
         return scaling
 
     @property
@@ -351,9 +367,11 @@ class GaussianModel:
             return explicit_normals
 
         planar_mask = self.get_is_planar.squeeze(-1)
-        if torch.any(planar_mask):
+        surface_mask = self.get_region_type.squeeze(-1) == 0 if self._region_type.numel() > 0 else torch.zeros_like(planar_mask)
+        override_mask = planar_mask | surface_mask
+        if torch.any(override_mask):
             normals = normals.clone()
-            normals[planar_mask] = explicit_normals[planar_mask]
+            normals[override_mask] = explicit_normals[override_mask]
         return normals
 
     def get_effective_rotation(self):
@@ -362,29 +380,31 @@ class GaussianModel:
 
         rotations = self.rotation_activation(self._rotation)
         planar_mask = self.get_is_planar.squeeze(-1) if self._primitive_type.numel() > 0 else torch.zeros((rotations.shape[0],), dtype=torch.bool, device=rotations.device)
-        if not torch.any(planar_mask):
+        surface_mask = self.get_region_type.squeeze(-1) == 0 if self._region_type.numel() > 0 else torch.zeros((rotations.shape[0],), dtype=torch.bool, device=rotations.device)
+        active_mask = planar_mask | surface_mask
+        if not torch.any(active_mask):
             return rotations
 
         rotation_matrices = self._rotation_matrices_from_quaternions(rotations)
         normals = self.get_normals()
-        tangent_u = rotation_matrices[planar_mask, :, 0]
-        planar_normals = normals[planar_mask]
-        tangent_u = tangent_u - torch.sum(tangent_u * planar_normals, dim=1, keepdim=True) * planar_normals
+        tangent_u = rotation_matrices[active_mask, :, 0]
+        active_normals = normals[active_mask]
+        tangent_u = tangent_u - torch.sum(tangent_u * active_normals, dim=1, keepdim=True) * active_normals
         tangent_u_norm = torch.linalg.norm(tangent_u, dim=1, keepdim=True)
 
-        fallback = torch.tensor([1.0, 0.0, 0.0], dtype=rotation_matrices.dtype, device=rotation_matrices.device).repeat(planar_normals.shape[0], 1)
-        parallel_x = torch.abs(torch.sum(fallback * planar_normals, dim=1, keepdim=True)) > 0.9
+        fallback = torch.tensor([1.0, 0.0, 0.0], dtype=rotation_matrices.dtype, device=rotation_matrices.device).repeat(active_normals.shape[0], 1)
+        parallel_x = torch.abs(torch.sum(fallback * active_normals, dim=1, keepdim=True)) > 0.9
         fallback[parallel_x.squeeze(-1)] = torch.tensor([0.0, 1.0, 0.0], dtype=rotation_matrices.dtype, device=rotation_matrices.device)
-        fallback = fallback - torch.sum(fallback * planar_normals, dim=1, keepdim=True) * planar_normals
+        fallback = fallback - torch.sum(fallback * active_normals, dim=1, keepdim=True) * active_normals
         fallback = F.normalize(fallback, dim=1)
 
         tangent_u = torch.where(tangent_u_norm > 1e-6, tangent_u / tangent_u_norm.clamp_min(1e-6), fallback)
-        tangent_v = F.normalize(torch.cross(planar_normals, tangent_u, dim=1), dim=1)
-        tangent_u = F.normalize(torch.cross(tangent_v, planar_normals, dim=1), dim=1)
+        tangent_v = F.normalize(torch.cross(active_normals, tangent_u, dim=1), dim=1)
+        tangent_u = F.normalize(torch.cross(tangent_v, active_normals, dim=1), dim=1)
 
-        planar_rotation = torch.stack((tangent_u, tangent_v, planar_normals), dim=2)
+        planar_rotation = torch.stack((tangent_u, tangent_v, active_normals), dim=2)
         rotation_matrices = rotation_matrices.clone()
-        rotation_matrices[planar_mask] = planar_rotation
+        rotation_matrices[active_mask] = planar_rotation
         return matrix_to_quaternion(rotation_matrices)
 
     def get_covariance(self, scaling_modifier=1):
@@ -393,8 +413,13 @@ class GaussianModel:
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.primitive_harden_iter = getattr(training_args, "primitive_harden_iter", self.primitive_harden_iter)
+        surface_thickness_max = getattr(training_args, "surface_thickness_max", None)
+        if surface_thickness_max is not None:
+            self.surface_thickness_max = surface_thickness_max
+            self.planar_thickness_max = surface_thickness_max
         if getattr(training_args, "planar_thickness_max", None) is not None:
             self.planar_thickness_max = training_args.planar_thickness_max
+            self.surface_thickness_max = training_args.planar_thickness_max
 
         device = self._device()
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device=device)

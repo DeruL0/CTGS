@@ -22,6 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interior-points-ratio", type=float, default=1.0, help="Interior bulk points as a ratio of extracted surface points.")
     parser.add_argument("--interior-boundary-margin", type=int, default=2, help="Minimum distance from the foreground boundary for interior bulk sampling.")
     parser.add_argument("--max-material-classes", type=int, default=3, help="Maximum number of automatically separated material classes.")
+    parser.add_argument("--support-threshold-mode", type=str, default="otsu", choices=["otsu", "multi_otsu"], help="Automatic threshold used to build the coarse solid support mask.")
+    parser.add_argument("--surface-gradient-percentile", type=float, default=60.0, help="Keep boundary-band voxels whose gradient magnitude is above this percentile.")
     return parser
 
 
@@ -32,74 +34,61 @@ def run_phase1(args: argparse.Namespace) -> None:
     metadata = loader.get_metadata()
 
     preprocessor = CTPreprocessor()
-    segmentation = preprocessor.segment_material_void(volume, method="multi_otsu", max_material_classes=args.max_material_classes)
-    material_mask = segmentation["material_mask"]
-    void_mask = segmentation["void_mask"]
-    foreground_mask = segmentation["foreground_mask"]
-    material_label_volume = segmentation["material_label_volume"]
-    if not np.any(material_mask):
-        raise RuntimeError("Material segmentation produced an empty mask.")
-    boundary_band = preprocessor.dilate_boundary(foreground_mask, width_voxels=args.boundary_width)
-    roi_bbox = segmentation["roi_bbox"]
-    surface_points, surface_material_id = preprocessor.extract_material_surface_points(material_label_volume, spacing)
-    if surface_points.shape[0] == 0:
-        raise RuntimeError("Surface extraction produced zero surface points.")
-    interior_target_count = max(1, int(round(surface_points.shape[0] * float(args.interior_points_ratio))))
-    interior_points, interior_density_seed, interior_material_id = preprocessor.sample_interior_points(
-        material_mask,
+    support = preprocessor.segment_coarse_support(volume, threshold_mode=args.support_threshold_mode)
+    support_mask = support["support_mask"]
+    if not np.any(support_mask):
+        raise RuntimeError("Coarse support extraction produced an empty mask.")
+
+    roi_bbox = support["roi_bbox"]
+    foreground_mask = support["roi_mask"]
+    air_mask = support["air_mask"]
+    material_mask = support_mask.copy()
+    void_mask = air_mask.copy()
+    material_label_volume = support_mask.astype(np.int32)
+    boundary_points = preprocessor.extract_intensity_surface_points(
+        volume,
+        support_mask,
+        spacing,
+        sigma=args.sigma,
+        gradient_percentile=args.surface_gradient_percentile,
+    )
+    boundary_material_id = np.zeros((boundary_points.shape[0], 1), dtype=np.int64)
+    if boundary_points.shape[0] == 0:
+        raise RuntimeError("Intensity-driven surface seeding produced zero surface points.")
+    interior_target_count = max(1, int(round(boundary_points.shape[0] * float(args.interior_points_ratio))))
+    interior_points, interior_density_seed, interior_material_id = preprocessor.sample_support_points(
+        support_mask,
         volume,
         spacing,
         target_count=interior_target_count,
         boundary_margin_voxels=args.interior_boundary_margin,
-        material_label_volume=material_label_volume,
     )
 
     analyzer = GeometryAnalyzer(sigma=args.sigma)
-    surface_normals = analyzer.estimate_surface_normals(surface_points, volume, spacing)
-    mask_planar, mask_edge, mask_curved = analyzer.classify_regions(surface_points, volume, spacing)
-
-    num_points = surface_points.shape[0]
-    plane_normals = np.full((num_points, 3), np.nan, dtype=np.float32)
-    plane_tangent_u = np.full((num_points, 3), np.nan, dtype=np.float32)
-    plane_tangent_v = np.full((num_points, 3), np.nan, dtype=np.float32)
-    plane_offsets = np.full((num_points,), np.nan, dtype=np.float32)
-    plane_residuals = np.full((num_points,), np.inf, dtype=np.float32)
-
-    if np.any(mask_planar):
-        plane_params, planar_residuals = analyzer.fit_local_planes(
-            surface_points[mask_planar],
-            surface_normals[mask_planar],
-            k_neighbors=args.k_neighbors,
-        )
-        plane_normals[mask_planar] = plane_params["normal"]
-        plane_tangent_u[mask_planar] = plane_params["tangent_u"]
-        plane_tangent_v[mask_planar] = plane_params["tangent_v"]
-        plane_offsets[mask_planar] = plane_params["offset"]
-        plane_residuals[mask_planar] = planar_residuals
+    boundary_normals, boundary_tangent_u, boundary_tangent_v, boundary_strength = analyzer.estimate_boundary_geometry(
+        boundary_points,
+        volume,
+        spacing,
+    )
 
     output_dir = Path(args.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     np.savez_compressed(
         str(output_dir / "analysis.npz"),
+        coarse_support_mask=support_mask.astype(bool),
+        support_threshold=np.asarray([support["support_threshold"]], dtype=np.float32),
         material_mask=material_mask.astype(bool),
         void_mask=void_mask.astype(bool),
         foreground_mask=foreground_mask.astype(bool),
-        boundary_band=boundary_band.astype(bool),
         roi_bbox=roi_bbox.astype(np.int32),
         material_label_volume=material_label_volume.astype(np.int32),
-        surface_points=surface_points.astype(np.float32),
-        surface_material_id=surface_material_id.astype(np.int64),
-        material_id=surface_material_id.astype(np.int64),
-        surface_normals=surface_normals.astype(np.float32),
-        mask_planar=mask_planar.astype(bool),
-        mask_edge=mask_edge.astype(bool),
-        mask_curved=mask_curved.astype(bool),
-        plane_normals=plane_normals.astype(np.float32),
-        plane_tangent_u=plane_tangent_u.astype(np.float32),
-        plane_tangent_v=plane_tangent_v.astype(np.float32),
-        plane_offsets=plane_offsets.astype(np.float32),
-        plane_residuals=plane_residuals.astype(np.float32),
+        boundary_points=boundary_points.astype(np.float32),
+        boundary_normals=boundary_normals.astype(np.float32),
+        boundary_tangent_u=boundary_tangent_u.astype(np.float32),
+        boundary_tangent_v=boundary_tangent_v.astype(np.float32),
+        boundary_strength=boundary_strength.astype(np.float32),
+        boundary_material_id=boundary_material_id.astype(np.int64),
         interior_points=interior_points.astype(np.float32),
         interior_density_seed=interior_density_seed.astype(np.float32),
         interior_material_id=interior_material_id.astype(np.int64),
@@ -108,12 +97,9 @@ def run_phase1(args: argparse.Namespace) -> None:
     metadata.update(
         {
             "roi_bbox_zyx": roi_bbox.tolist(),
-            "surface_point_count": int(num_points),
+            "boundary_point_count": int(boundary_points.shape[0]),
             "interior_point_count": int(interior_points.shape[0]),
-            "material_class_count": int(segmentation["material_class_count"]),
-            "planar_count": int(np.sum(mask_planar)),
-            "edge_count": int(np.sum(mask_edge)),
-            "curved_count": int(np.sum(mask_curved)),
+            "material_class_count": 1,
             "parameters": {
                 "sigma": float(args.sigma),
                 "boundary_width": int(args.boundary_width),
@@ -121,6 +107,8 @@ def run_phase1(args: argparse.Namespace) -> None:
                 "interior_points_ratio": float(args.interior_points_ratio),
                 "interior_boundary_margin": int(args.interior_boundary_margin),
                 "max_material_classes": int(args.max_material_classes),
+                "support_threshold_mode": str(args.support_threshold_mode),
+                "surface_gradient_percentile": float(args.surface_gradient_percentile),
             },
             "outputs": {
                 "analysis_bundle": "analysis.npz",

@@ -5,17 +5,25 @@ __pycache__/
 
 .venv/
 .vscode/
+.claude/
+.pytest_cache/
+viewer/node_modules/
+viewer/dist/
+viewer/*.tsbuildinfo
 
 build/
 *.egg-info/
 submodules/ct-native-backend/build/
 
+output/
 outputs/
+paper/
 assets/
 data/
 fig/
 wandb/
 tensorboard_3d/
 screenshots/
+outputsbunny_smokeinside_mask_floor_2500_20260527/
 
 build_ct_native_verbose.log

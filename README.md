@@ -1,314 +1,276 @@
 # CTGS
 
-`CTGS` is a CT-only Gaussian representation repository for industrial volume data.
-It focuses on the full pipeline around CT volumes: ingestion, geometric analysis, hybrid Gaussian modeling, CT-specific training, runtime acceleration, and export to display and analysis formats.
+CTGS is a CT-only Gaussian representation pipeline for industrial reconstructed volumes.
+The repository is intentionally centered on one workflow:
 
-This repository is no longer a general SAD-GS / NeRF-style scene training project.
-It is organized around one target problem: turning reconstructed CT volumes into an interactive Gaussian representation that remains useful for inspection, slicing, meshing, and downstream geometric analysis.
+1. run Phase 1 geometric analysis on a CT volume
+2. initialize a hybrid Gaussian model from the canonical Phase 1 bundle
+3. train with the minimal CT objective
+4. export the trained representation for display or downstream analysis
 
-In practical terms, the repository is meant to make CT data easier to:
+This is no longer a mixed scene-training repository. A small legacy SH payload is still retained for PLY/viewer compatibility, but it is frozen and is not an active CT training signal.
 
-- compress into a lighter interactive representation
-- display quickly for browsing and inspection
-- export into analysis-oriented geometry formats
+## Active Pipeline
 
-## Overview
-
-The repository provides:
+The maintained path is:
 
 - CT volume loading from DICOM, RAW, and TIFF
-- Phase 1 preprocessing and boundary-field analysis
-- boundary-driven surface and bulk Gaussian primitives for CT modeling
-- CT-only training with slice supervision, occupancy supervision, and signed-field boundary regularization
-- native CUDA acceleration for the main CT training bottlenecks, including local-query acceleration
-- export paths for display GS, mesh, and SDF
+- Phase 1 preprocessing and boundary analysis
+- hybrid Gaussian initialization with surface and bulk roles
+- CT-only training in [`train_ct.py`](/d:/Projects/3.3DGS/SAD-GS/train_ct.py)
+- export through [`ct_pipeline/exporting/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/exporting)
 
-At a high level, the pipeline is:
+The maintained high-level docs are:
 
-1. load a reconstructed CT volume
-2. segment material / void structure and analyze local geometry
-3. initialize a hybrid CT Gaussian model
-4. train the model with CT-specific losses
-5. export the trained representation for viewing or analysis
-
-## Design Goals
-
-CTGS is built around a few practical assumptions:
-
-- CT is not treated like a camera-scene dataset
-- the training target is a volumetric CT field, not RGB novel-view synthesis
-- surface structure matters, but internal material / void structure matters too
-- fast display and geometric analysis do not have to use the exact same output format
-- compact representation and fast browsing are first-class goals, not afterthoughts
-
-This is why the repository keeps:
-
-- a hybrid Gaussian model for interactive representation
-- CT-specific losses instead of image-space GS losses
-- mesh / SDF export for analysis-oriented downstream use
+- [`README.md`](/d:/Projects/3.3DGS/SAD-GS/README.md)
+- [`ICPE_REPORT.md`](/d:/Projects/3.3DGS/SAD-GS/ICPE_REPORT.md)
 
 ## Repository Layout
 
-Core directories and entrypoints:
+- [`ct_pipeline/backend/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/backend): native CUDA wrapper split by core state, grids, queries, and rendering
+- [`ct_pipeline/config/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/config): model and optimization argument definitions
+- [`ct_pipeline/data/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/data): CT volume loading and Phase 1 preprocessing
+- [`ct_pipeline/geometry/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/geometry): geometry analysis and curvature helpers
+- [`ct_pipeline/rendering/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/rendering): field queries, bulk support rules, and slice rendering
+- [`ct_pipeline/exporting/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/exporting): PLY, mesh, and SDF export
+- [`ct_pipeline/runtime/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/runtime): runtime acceleration and compression utilities
+- [`ct_pipeline/training/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/training): parser defaults, bootstrap/runtime losses, sampling, densification, grid caching, and reporting
+- [`ct_pipeline/viewer/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline/viewer): local viewer session loading and HTTP API
+- [`scene/`](/d:/Projects/3.3DGS/SAD-GS/scene): base Gaussian storage plus CT-specific initialization
+- [`tools/`](/d:/Projects/3.3DGS/SAD-GS/tools): reusable evaluation and comparison commands
+- [`scripts/`](/d:/Projects/3.3DGS/SAD-GS/scripts): reproducible diagnostics and ablation launchers
+- [`viewer/`](/d:/Projects/3.3DGS/SAD-GS/viewer): browser frontend source; generated `dist/` assets remain untracked
+- [`tests/`](/d:/Projects/3.3DGS/SAD-GS/tests): regression and contract tests for the maintained CTGS path
 
-- [`ct_pipeline/`](/d:/Projects/3.3DGS/SAD-GS/ct_pipeline)
-  CT data pipeline modules: loading, preprocessing, geometry analysis, acceleration, compression, exporters, field queries, and backend wrappers
-- [`scene/`](/d:/Projects/3.3DGS/SAD-GS/scene)
-  Gaussian model core and the CT-specific hybrid model
-- [`submodules/ct-native-backend/`](/d:/Projects/3.3DGS/SAD-GS/submodules/ct-native-backend)
-  Native CUDA extension for CT training acceleration
-- [`tests/`](/d:/Projects/3.3DGS/SAD-GS/tests)
-  Regression and smoke tests for the CTGS pipeline
-- [`run_ct_phase1.py`](/d:/Projects/3.3DGS/SAD-GS/run_ct_phase1.py)
-  Standalone Phase 1 ingestion and analysis entrypoint
-- [`train_ct.py`](/d:/Projects/3.3DGS/SAD-GS/train_ct.py)
-  Main CT training entrypoint
-- [`mesher.py`](/d:/Projects/3.3DGS/SAD-GS/mesher.py)
-  CT mesh extraction utility
+## Representation
 
-## Main Components
+CTGS uses two primitive roles:
 
-### 1. CT ingestion and preprocessing
+- `region_type == 0`: surface Gaussians
+- `region_type == 1`: bulk Gaussians
 
-Phase 1 converts a CT dataset into a structured analysis bundle.
-This bundle contains the masks, boundary samples, interior samples, and geometric annotations needed by the later training stages.
+`region_type` is the only role signal used by the active training path.
+`primitive_type` is still stored in checkpoints and PLY payloads, but it is frozen by default and is not used to decide surface-versus-bulk behavior.
 
-The current preprocessing path is `void-aware`:
+## Current Algorithm
 
-- `material_mask` represents occupied material
-- `void_mask` represents low-density internal or ROI-contained empty regions
-- `foreground_mask` is retained as a coarse ROI / compatibility mask
-- `boundary_points`, `boundary_normals`, and boundary tangents define the active surface initialization signal
+The maintained default uses `sparse_reseed` bulk initialization. Alternative
+bulk initialization modes, including FASJ, remain explicit experiment options
+selected with `--ct_bulk_init_mode`; they are not the default training path.
 
-### 2. Hybrid Gaussian representation
+The default execution shape is:
 
-The current active model combines:
+- `material_mask` defines the coarse material support and the phase target.
+- SDF provides boundary distance, containment checks, and sampling regions.
+- surface Gaussians represent the material boundary.
+- bulk Gaussians represent material intensity in the interior.
+- training reads bulk intensity through the unified compositor with its
+  configured material gate.
+- saved raw-bulk diagnostics intentionally disable that gate so leakage remains
+  visible instead of being hidden by the display path.
+- surface reseeding and bulk reseeding are enabled by default.
+- traditional split densification is available, but its default surface and
+  bulk split percentages are both zero.
 
-- `surface` Gaussians aligned to the material boundary
-- `bulk` Gaussians placed inside material regions
+FASJ and coverage-repair options are retained for controlled ablations. Their
+clearance and containment rules should not be described as unconditional
+properties of the default run.
 
-In the active path, surface primitives are anisotropic 3D Gaussians aligned to boundary normals and tangents.
-Bulk primitives are volumetric 3D Gaussians used to preserve material occupancy.
+The current research path is a role-separated CT Gaussian model:
 
-The model persists CT-specific metadata such as:
+- `region_type == 0` surface Gaussians model material boundaries
+- `region_type == 1` bulk Gaussians model material interiors
+- SH feature tensors are retained only as frozen PLY/viewer compatibility payloads
 
-- normals
-- material id
-- region type
+Training uses calibrated CT intensity reconstruction, unified phase occupancy supervision, a compact surface regularizer, and role-specific scale clamps:
 
-### 3. CT-specific training
-
-Training is based on CT slice supervision and geometry-aware regularization rather than camera rendering.
-
-The training loop includes:
-
-- slice consistency loss
-- occupancy supervision
-- boundary-center regularization
-- boundary-normal regularization
-- signed-surface regularization
-- surface thickness penalty
-- material boundary regularization
-
-The active boundary path is `boundary-driven` rather than marching-cubes surface-first.
-Surface Gaussians are pulled toward the material boundary using cached boundary fields and a signed field derived from the material mask.
-
-### 4. Native CUDA backend
-
-The repository includes a dedicated CT CUDA backend for the main training bottlenecks.
-This backend is separate from the removed old GS rasterizer stack.
-
-Current native acceleration covers:
-
-- slice patch rendering
-- density query
-- uniform-grid local-query acceleration for slice and occupancy
-- KNN refresh
-- cached boundary / signed-field sampling
-
-The active slice and occupancy path no longer scans the full Gaussian set for every pixel or query point.
-Instead, the backend rebuilds a per-iteration uniform grid and evaluates only the local Gaussian subset relevant to the current patch or occupancy query points.
-
-### 5. Dual-output export
-
-The trained CTGS model can be exported to different representations depending on the use case:
-
-- display GS for lightweight viewing and compressed distribution
-- mesh for geometry-oriented inspection
-- SDF for downstream analysis workflows
-
-## Rendering And Viewing
-
-This repository does not include a full standalone rendering application or an online viewer service.
-Its role is to produce the CTGS representation and export formats, not to ship a complete end-user visualization product.
-
-In practice, the recommended usage is:
-
-- train and export a lightweight display GS from this repository
-- view that output in an external viewer, custom frontend, or online visualization pipeline
-- use mesh / SDF exports when a pure Gaussian display is not the right downstream format
-
-So the repository should be understood as the CT representation, training, and export stack, not the final viewer itself.
-
-## Installation
-
-```powershell
-conda env create --file environment.yml
-conda activate gaussian_splatting
+```text
+L_total =
+  ct_lambda_volume                  * L_volume
++ ct_lambda_occupancy               * L_occupancy
++ ct_surface_regularizer_weight     * L_surface_regularizer
 ```
 
-The environment installs the CT native backend from `submodules/ct-native-backend`.
+Where:
 
-## Environment Configuration
+- `L_volume`: Huber reconstruction at sampled CT volume points after fixed air/material intensity calibration
+- `L_occupancy`: raw combined Gaussian occupancy supervised against the material mask, with SDF-weighted boundary samples
+- `L_surface_regularizer`: coarse-SDF normal alignment, normal-thickness, and tangential-spread control
+- bulk scale is capped by a global max clamp, not by EDT containment projection or a separate bulk-only loss
 
-The default environment in [`environment.yml`](/d:/Projects/3.3DGS/SAD-GS/environment.yml) is currently based on:
+The occupancy path uses the Phase 1 `material_mask` as the only phase target. Sampling is split across boundary, deep material, and air; air sampling keeps an explicit void bias so cavity air is preserved without a separate bulk-only objective.
 
-- Python `3.7.13`
-- PyTorch `1.12.1`
-- CUDA runtime `11.6`
-- `scipy`
-- `scikit-image`
-- `pydicom`
-- `tifffile`
-- `tqdm`
+At the boundary band, surface Gaussians own the prediction:
 
-This repository is designed around a CUDA-enabled workflow.
-The current CT training path requires a working GPU environment.
+```text
+w = smooth_boundary_weight(|sdf|, boundary_band)
+pred_occ = (1 - w) * bulk_occ + w * surface_occ
+```
 
-Important practical notes:
+Surface reseeding is enabled by default to add missing surface Gaussians where
+boundary anchors are still bulk-owned. Bulk reseeding is also enabled by
+default. Traditional densification remains configurable, but its default split
+percentages are zero.
 
-- `--ct_backend python` is a Python reference implementation, not a CPU training mode
-- CT training still requires `torch.cuda.is_available() == True`
-- the native backend is built with `torch.utils.cpp_extension.CUDAExtension`
+Current experimental status:
 
-### Native backend build requirements
+- cavity/void occupancy is much healthier after explicit `void_air` sampling
+- surface placement is the acceptance-critical metric for v4: renders can look good while surface drift and scale quantiles remain poor
+- traditional densification does not create splits under default percentages
 
-To build `submodules/ct-native-backend`, you need a usable local CUDA build toolchain in addition to the Conda runtime packages.
+## Densification
 
-Typical requirements:
+The repository keeps the current CT-aware densification path:
 
-- an NVIDIA driver that works with your installed PyTorch / CUDA stack
-- a local CUDA toolkit with `nvcc`
-- a C++ compiler supported by your PyTorch CUDA extension toolchain
+- tangential split for surface Gaussians
+- scale-aware split for bulk Gaussians
 
-On Windows, that usually means:
+The switch is enabled by default, but both default split percentages are zero,
+so it does not create new Gaussians unless explicitly configured.
+Current bunny tuning results do not support enabling it as the best default path yet.
 
-- Visual Studio C++ Build Tools
-- a CUDA toolkit installation compatible with the `cu116`-style environment
+## Canonical CLI
 
-### Recommended verification
+### Phase 1
 
-After activating the environment, verify the basics:
+```powershell
+python run_ct_phase1.py `
+  --input D:\path\to\ct_data `
+  --fmt auto `
+  --output D:\path\to\phase1_out
+```
+
+### Training
+
+```powershell
+python train_ct.py `
+  --model_path D:\path\to\train_out `
+  --ct_phase1_dir D:\path\to\phase1_out `
+  --ct_volume_path D:\path\to\ct_data `
+  --ct_volume_format auto `
+  --ct_lambda_volume 1.0 `
+  --ct_lambda_occupancy 0.5 `
+  --ct_surface_regularizer_weight 0.7 `
+  --output_gs D:\path\to\train_out\display.ply
+```
+
+For the June 2026 `clearance_balanced_246` bulk attenuation experiment, use the
+named preset instead of repeating the full tuning matrix:
+
+```powershell
+python train_ct.py `
+  --ct_preset clearance_balanced_246 `
+  --ct_phase1_dir outputs\figure_153505_test\phase1_ds4x4x4_keep_components_003_surf2 `
+  --ct_volume_path outputs\figure_153505_test\figure_153505_ds4x4x4_float32_norm.raw `
+  --ct_raw_meta outputs\figure_153505_test\figure_153505_ds4x4x4_float32_norm.json `
+  --skip_export_mesh `
+  --skip_export_sdf `
+  --quiet `
+  --iterations 500 `
+  --save_iterations 500 `
+  --checkpoint_iterations 500 `
+  --model_path outputs\figure_153505_test\clearance_balanced_246_fixed_phase1_500_20260601
+```
+
+The `.raw` suffix is detected automatically. Preset values are applied first,
+so a later explicit flag still overrides the recipe for focused ablations.
+
+Important notes:
+
+- the active training path requires CUDA plus the `ct_native_backend` extension
+- a small set of parser aliases is still accepted for command compatibility
+- legacy Phase 1 bundles that contain `material_mask` but not `coarse_support_mask` are accepted through a compatibility alias
+- SH feature fields are kept only for display/PLY compatibility and are frozen during CT training
+
+## Environment
+
+The baseline environment is defined in [`environment.yml`](/d:/Projects/3.3DGS/SAD-GS/environment.yml).
+The repository expects:
+
+- a CUDA-capable PyTorch installation
+- a working local CUDA toolchain for the native backend
+- enough GPU memory for the chosen CT volume
+
+After environment setup, verify:
 
 ```powershell
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 python -c "import ct_native_backend._C as C; print('ct_native_backend ok')"
 ```
 
-If the native extension is unavailable, the repository can still fall back to the Python backend for some paths, but the main training workflow is still GPU-only.
-
-### Common setup guidance
-
-- Use the provided Conda environment as the baseline instead of mixing unrelated system Python packages
-- Keep the local CUDA toolkit version aligned with the PyTorch extension build path
-- If the native backend fails to compile, verify compiler discovery first, then CUDA toolkit / `nvcc`, then PyTorch CUDA compatibility
-- Large CT volumes also need enough GPU memory and host RAM; environment setup alone is not enough if the machine is too small for the dataset
-
-## Typical Workflow
-
-### Phase 1
-
-```powershell
-python run_ct_phase1.py ^
-  --input D:\path\to\ct_data ^
-  --fmt auto ^
-  --output D:\path\to\phase1_out
-```
-
-Supported inputs:
-
-- DICOM series directory or representative slice
-- RAW volume with JSON sidecar
-- TIFF stack file or TIFF slice directory
-
-### Training
-
-```powershell
-python train_ct.py ^
-  --model_path D:\path\to\train_out ^
-  --ct_phase1_dir D:\path\to\phase1_out ^
-  --ct_volume_path D:\path\to\ct_data ^
-  --ct_volume_format auto ^
-  --ct_backend auto ^
-  --output_gs D:\path\to\train_out\display.ply
-```
-
-Backends:
-
-- `--ct_backend auto`
-- `--ct_backend cuda`
-- `--ct_backend python` for reference / inactive compatibility paths only
-
-The active signed-field boundary training path is CUDA-only.
-In practice, `auto` is expected to resolve to the native CUDA backend for normal training.
-
-### Mesh extraction
-
-```powershell
-python mesher.py ^
-  --input D:\path\to\train_out ^
-  --output D:\path\to\mesh.ply ^
-  --iteration -1 ^
-  --resolution 0.05 ^
-  --threshold 0.5
-```
-
 ## Outputs
 
-Phase 1 produces:
-
-- `analysis.npz`
-- `metadata.json`
-
-Training produces:
+Training can produce:
 
 - checkpoints
-- per-iteration point clouds
-- optional display GS export
-- optional mesh export
-- optional SDF export
+- PLY exports for display
+- mesh exports
+- SDF exports
+- preview slices and drift diagnostics
 
-## Scope
+## Local Viewer
 
-This repository intentionally does not include the old scene-based SAD-GS stack anymore.
-Removed categories include:
+Serve a trained CTGS PLY with:
 
-- camera scene loading
-- standard GS train / render / eval scripts
-- COLMAP / Replica / Blender style pipelines
-- the old general-purpose rasterizer training path
+```powershell
+python -m ct_pipeline.viewer serve --ply D:\path\to\display.ply --device auto
+```
 
-What remains is the CTGS stack only.
+Use `--device cpu` when CUDA memory should remain reserved for training.
 
-## Compatibility
+## Mesh Extraction
 
-`CTGaussianModel` still provides best-effort loading for older GS-style PLY / checkpoint payloads so they can be read and resaved into the CTGS representation.
-That compatibility is limited to model payload handling; the old training and rendering entrypoints are not part of this repository anymore.
+The default CT mesh extractor is SuGaR-style:
+
+1. keep surface Gaussians,
+2. use each Gaussian's shortest covariance axis as the oriented surface normal,
+3. sample a small local tangent diamond around each center,
+4. reconstruct the surface with Poisson reconstruction,
+5. optionally project mesh vertices back onto the sampled Gaussian surface points.
+
+The older density-volume marching-cubes extractor is still available for A/B runs:
+
+```powershell
+python mesher.py `
+  --input D:\path\to\train_out `
+  --output D:\path\to\mesh_density.ply `
+  --method density
+```
+
+## Mesh Evaluation
+
+Evaluate an extracted mesh against the Phase 1 support boundary:
+
+```powershell
+python -m tools.mesh_evaluator `
+  --mesh D:\path\to\mesh.ply `
+  --phase1 D:\path\to\phase1 `
+  --output D:\path\to\mesh_metrics.json
+```
+
+Or extract and evaluate directly from a CTGS PLY/training output:
+
+```powershell
+python -m tools.mesh_evaluator `
+  --input D:\path\to\train_out `
+  --phase1 D:\path\to\phase1 `
+  --mesh-output D:\path\to\extracted_mesh.ply `
+  --output D:\path\to\mesh_metrics.json
+```
+
+The evaluator reports bidirectional distance metrics, symmetric Chamfer/Hausdorff, support-SDF outside ratio, and mesh component statistics.
 
 ## Tests
 
-Run the CTGS regression suite with:
+Run the focused regression suites with:
 
 ```powershell
-python -m unittest discover -s tests
+python -m unittest discover -s tests -v
 ```
 
-The tests cover:
+Run native CUDA parity checks explicitly when the GPU is available:
 
-- Phase 1 loading and preprocessing
-- geometry analysis
-- hybrid model persistence and initialization
-- CT losses
-- native backend parity and stability
-- training smoke runs
-- exporter and mesher behavior
+```powershell
+$env:CTGS_RUN_CUDA_TESTS = "1"
+python -m unittest discover -s tests -p test_ct_native_backend.py -v
+```

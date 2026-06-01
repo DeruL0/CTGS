@@ -18,9 +18,8 @@ try:
 except ImportError:  # pragma: no cover
     tifffile = None
 
-from ct_pipeline.ct_loader import CTVolumeLoader
-from ct_pipeline.ct_preprocessor import CTPreprocessor
-from ct_pipeline.geometry_analyzer import GeometryAnalyzer
+from ct_pipeline.data import CTPreprocessor, CTVolumeLoader
+from ct_pipeline.geometry import GeometryAnalyzer
 from run_ct_phase1 import main as run_ct_phase1_main
 
 
@@ -255,8 +254,6 @@ class CTPreprocessorTests(unittest.TestCase):
             self.volume,
             support["support_mask"],
             self.spacing,
-            sigma=1.0,
-            gradient_percentile=50.0,
         )
         self.assertGreater(points.shape[0], 0)
 

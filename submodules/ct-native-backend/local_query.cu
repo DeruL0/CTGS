@@ -1028,17 +1028,17 @@ __device__ __forceinline__ void slice_world_point(
     int row = pixel_index / patch_w;
     int col = pixel_index % patch_w;
     if (axis_index == 0) {
-        *x = static_cast<float>(origin_w + col) * spacing_x;
-        *y = static_cast<float>(origin_h + row) * spacing_y;
-        *z = static_cast<float>(slice_idx) * spacing_z;
+        *x = (static_cast<float>(origin_w + col) + 0.5f) * spacing_x;
+        *y = (static_cast<float>(origin_h + row) + 0.5f) * spacing_y;
+        *z = (static_cast<float>(slice_idx) + 0.5f) * spacing_z;
     } else if (axis_index == 1) {
-        *x = static_cast<float>(origin_w + col) * spacing_x;
-        *y = static_cast<float>(slice_idx) * spacing_y;
-        *z = static_cast<float>(origin_h + row) * spacing_z;
+        *x = (static_cast<float>(origin_w + col) + 0.5f) * spacing_x;
+        *y = (static_cast<float>(slice_idx) + 0.5f) * spacing_y;
+        *z = (static_cast<float>(origin_h + row) + 0.5f) * spacing_z;
     } else {
-        *x = static_cast<float>(slice_idx) * spacing_x;
-        *y = static_cast<float>(origin_w + col) * spacing_y;
-        *z = static_cast<float>(origin_h + row) * spacing_z;
+        *x = (static_cast<float>(slice_idx) + 0.5f) * spacing_x;
+        *y = (static_cast<float>(origin_w + col) + 0.5f) * spacing_y;
+        *z = (static_cast<float>(origin_h + row) + 0.5f) * spacing_z;
     }
 }
 

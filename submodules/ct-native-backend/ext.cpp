@@ -135,26 +135,6 @@ torch::Tensor sample_boundary_field_backward_cuda(
     double spacing_y,
     double spacing_x);
 
-std::vector<torch::Tensor> build_plane_targets_cuda(
-    torch::Tensor xyz,
-    torch::Tensor normals,
-    torch::Tensor planarity,
-    torch::Tensor material_ids,
-    torch::Tensor planar_mask,
-    torch::Tensor neighbor_index);
-
-torch::Tensor build_neighbor_index_cuda(
-    torch::Tensor xyz,
-    int64_t k,
-    int64_t tile_size);
-
-torch::Tensor point_to_plane_loss_cuda(
-    torch::Tensor xyz,
-    torch::Tensor active_indices,
-    torch::Tensor centroids,
-    torch::Tensor fitted_normals,
-    torch::Tensor weights);
-
 torch::Tensor surface_thickness_loss_forward_cuda(
     torch::Tensor raw_scaling,
     torch::Tensor rotation_mats,
@@ -166,21 +146,6 @@ std::vector<torch::Tensor> surface_thickness_loss_backward_cuda(
     torch::Tensor rotation_mats,
     torch::Tensor normals,
     double max_thickness,
-    torch::Tensor grad_output);
-
-torch::Tensor material_boundary_loss_forward_cuda(
-    torch::Tensor xyz,
-    torch::Tensor material_ids,
-    torch::Tensor opacity,
-    torch::Tensor neighbor_index,
-    double target_opacity);
-
-std::vector<torch::Tensor> material_boundary_loss_backward_cuda(
-    torch::Tensor xyz,
-    torch::Tensor material_ids,
-    torch::Tensor opacity,
-    torch::Tensor neighbor_index,
-    double target_opacity,
     torch::Tensor grad_output);
 
 torch::Tensor build_signed_field_cuda(
@@ -233,18 +198,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &sample_boundary_field_backward_cuda,
         "CT native boundary field sampling backward (CUDA)");
     m.def(
-        "build_plane_targets_cuda",
-        &build_plane_targets_cuda,
-        "Build detached point-to-plane targets on CUDA");
-    m.def(
-        "build_neighbor_index_cuda",
-        &build_neighbor_index_cuda,
-        "Build exact KNN neighbor indices on CUDA");
-    m.def(
-        "point_to_plane_loss_cuda",
-        &point_to_plane_loss_cuda,
-        "Compute point-to-plane loss from cached plane targets on CUDA");
-    m.def(
         "surface_thickness_loss_forward",
         &surface_thickness_loss_forward_cuda,
         "CT surface thickness loss forward");
@@ -252,14 +205,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "surface_thickness_loss_backward",
         &surface_thickness_loss_backward_cuda,
         "CT surface thickness loss backward");
-    m.def(
-        "material_boundary_loss_forward",
-        &material_boundary_loss_forward_cuda,
-        "CT material boundary loss forward");
-    m.def(
-        "material_boundary_loss_backward",
-        &material_boundary_loss_backward_cuda,
-        "CT material boundary loss backward");
     m.def(
         "build_signed_field_cuda",
         &build_signed_field_cuda,

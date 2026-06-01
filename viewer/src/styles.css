@@ -1,0 +1,500 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", "SF Pro Text", sans-serif;
+  line-height: 1.4;
+  font-weight: 400;
+  --bg: #0a0f14;
+  --bg-elevated: #101821;
+  --bg-panel: rgba(16, 24, 33, 0.92);
+  --bg-panel-strong: rgba(19, 29, 39, 0.98);
+  --border: rgba(129, 162, 173, 0.22);
+  --border-strong: rgba(129, 162, 173, 0.35);
+  --text: #e5edf2;
+  --text-muted: #90a5b2;
+  --accent: #69d8c4;
+  --accent-strong: #2db8a3;
+  --warm: #d99650;
+  --danger: #f19380;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  height: 100%;
+  background:
+    linear-gradient(180deg, rgba(20, 33, 44, 0.9), rgba(7, 11, 16, 0.98)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(94, 134, 154, 0.05) 0,
+      rgba(94, 134, 154, 0.05) 1px,
+      transparent 1px,
+      transparent 96px
+    );
+  color: var(--text);
+}
+
+body {
+  overflow: hidden;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button:disabled,
+input:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+/* ─── Shell ─────────────────────────────────────────────── */
+
+.app-shell {
+  height: 100%;
+  display: grid;
+  grid-template-rows: 56px minmax(0, 1fr);
+}
+
+/* ─── Toolbar ────────────────────────────────────────────── */
+
+.app-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(8, 12, 18, 0.88);
+  backdrop-filter: blur(14px);
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.title-block h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.eyebrow {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.session-statline {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.session-statline span {
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(94, 134, 154, 0.1);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.toolbar-modes {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
+
+/* ─── Workspace ──────────────────────────────────────────── */
+
+.workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+}
+
+/* ─── Viewport column (2 rows: control-strip + 3D canvas) ── */
+
+.viewport-column {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-right: 1px solid var(--border);
+}
+
+.control-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  flex-wrap: wrap;
+}
+
+/* Groups related toggles (e.g. Clip + Reverse) so they read as one control. */
+.button-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Deliberately-disabled toggles are not a loading state; use not-allowed. */
+.button-cluster button:disabled,
+.section-toolbar button:disabled {
+  cursor: not-allowed;
+}
+
+.viewport-shell {
+  min-height: 0;
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(12, 17, 22, 0.82), rgba(10, 15, 20, 0.96)),
+    repeating-linear-gradient(
+      0deg,
+      rgba(102, 130, 144, 0.05) 0,
+      rgba(102, 130, 144, 0.05) 1px,
+      transparent 1px,
+      transparent 60px
+    );
+}
+
+.viewport-loading {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+/* ─── Inspector column (sticky top + scrollable rest) ─────── */
+
+.inspector-column {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-panel-strong);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.inspector-sticky {
+  /* Slice panel + slice slider — always visible, never scrolled away */
+  display: flex;
+  flex-direction: column;
+  border-bottom: 2px solid var(--border-strong);
+}
+
+.inspector-scrollable {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── Slice panel ────────────────────────────────────────── */
+
+.slice-panel,
+.inspector-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.slice-stage {
+  position: relative;
+  aspect-ratio: 1;
+  border: 1px solid var(--border-strong);
+  background:
+    linear-gradient(180deg, rgba(7, 10, 14, 0.88), rgba(18, 27, 37, 0.92)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(107, 150, 171, 0.05) 0,
+      rgba(107, 150, 171, 0.05) 1px,
+      transparent 1px,
+      transparent 24px
+    );
+  overflow: hidden;
+}
+
+.slice-image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  /* image-rendering set inline based on sliceSize */
+}
+
+.slice-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(8, 12, 18, 0.52);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ─── Slice slider (inside inspector-sticky) ─────────────── */
+
+.slice-slider-band {
+  padding: 10px 14px 12px;
+  background: var(--bg-panel);
+}
+
+.slider-label-row,
+.section-heading,
+.slider-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.slider-label-row {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.slider-label-row span:first-child,
+.section-heading span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wide-slider,
+.slider-field input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+/* ─── Inspector sections ─────────────────────────────────── */
+
+.section-heading {
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.section-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.slider-field {
+  margin-bottom: 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.slider-field span:nth-child(2) {
+  color: var(--text);
+}
+
+.section-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.preview-mode-group {
+  flex: 1;
+  min-width: 180px;
+}
+
+.preview-mode-group button {
+  min-width: 0;
+}
+
+.icon-toggle.mini {
+  justify-self: end;
+  padding: 5px 7px;
+}
+
+.range-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.range-summary span {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(10, 14, 18, 0.42);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.session-grid {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.session-grid div {
+  display: grid;
+  gap: 3px;
+}
+
+.session-grid dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.session-grid dd {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.error-text {
+  margin: 12px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+/* ─── Controls ───────────────────────────────────────────── */
+
+.segmented-group {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(10, 14, 18, 0.72);
+}
+
+.segmented-group button,
+.icon-toggle {
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.segmented-group button {
+  min-width: 38px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.segmented-group button.is-active,
+.icon-toggle.is-active {
+  color: var(--text);
+  background: rgba(93, 214, 197, 0.16);
+}
+
+.icon-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(10, 14, 18, 0.74);
+  font-size: 13px;
+}
+
+.icon-toggle.compact {
+  padding-inline: 9px;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.fps-control {
+  display: grid;
+  grid-template-columns: auto 58px minmax(100px, 150px);
+  align-items: center;
+  gap: 7px;
+  min-width: 190px;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(10, 14, 18, 0.74);
+}
+
+.fps-control span {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.fps-control input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+/* ─── Responsive ─────────────────────────────────────────── */
+
+/* Narrow toolbar: hide mode button labels, show icons only */
+@media (max-width: 1280px) {
+  .toolbar-modes .icon-toggle span {
+    display: none;
+  }
+
+  .toolbar-modes .icon-toggle {
+    padding-inline: 9px;
+  }
+
+  .session-statline {
+    display: none;
+  }
+}
+
+/* Single-column stacked layout */
+@media (max-width: 1100px) {
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .viewport-column {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .inspector-column {
+    max-height: 40vh;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  /* Fix: app-toolbar is flex, not grid — use flex wrapping */
+  .app-toolbar {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 8px 16px;
+    gap: 8px;
+    min-height: 56px;
+  }
+}

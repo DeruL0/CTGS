@@ -14,5 +14,9 @@ dependencies:
   - pydicom
   - tifffile
   - tqdm
+  - pillow
   - pip:
     - submodules/ct-native-backend
+    - fastapi
+    - httpx
+    - uvicorn

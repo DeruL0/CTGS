@@ -34,7 +34,7 @@ def build_training_args():
 
 
 def seed_gaussian_core(model: GaussianModel):
-    device = torch.device("cuda")
+    device = torch.device("cpu")
     xyz = torch.tensor(
         [
             [0.0, 0.0, 0.0],
@@ -61,7 +61,6 @@ def seed_gaussian_core(model: GaussianModel):
     return model
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for hybrid Gaussian model tests")
 class HybridGaussianModelTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
@@ -87,8 +86,8 @@ class HybridGaussianModelTests(unittest.TestCase):
     def test_capture_and_restore_preserve_hybrid_fields(self):
         model = seed_gaussian_core(GaussianModel(sh_degree=0))
         model._primitive_type.data[:2] = model.planar_logit_value
-        model._normal.data[:2] = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], device="cuda")
-        model._material_id[:2] = torch.tensor([[3], [4]], device="cuda")
+        model._normal.data[:2] = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        model._material_id[:2] = torch.tensor([[3], [4]])
         model._planarity[:2] = 1.0
         model._region_type[2:] = 1
         model.planar_thickness_max = 0.02
@@ -102,7 +101,7 @@ class HybridGaussianModelTests(unittest.TestCase):
         self.assertTrue(torch.equal(restored.get_region_type, model.get_region_type))
         self.assertEqual(restored.planar_thickness_max, 0.02)
 
-    def test_legacy_checkpoint_restore_fills_ct_defaults(self):
+    def test_legacy_checkpoint_restore_is_rejected(self):
         model = seed_gaussian_core(GaussianModel(sh_degree=0))
         legacy_args = (
             model.active_sh_degree,
@@ -120,35 +119,18 @@ class HybridGaussianModelTests(unittest.TestCase):
         )
 
         restored = GaussianModel(sh_degree=0)
-        restored.restore(legacy_args)
-        self.assertTrue(torch.all(restored.get_is_planar == 0))
-        self.assertTrue(torch.all(restored._material_id == -1))
-        self.assertTrue(torch.allclose(restored._planarity, torch.zeros_like(restored._planarity)))
-        self.assertTrue(torch.all(restored.get_region_type == 0))
+        with self.assertRaisesRegex(ValueError, "current CTGS pipeline"):
+            restored.restore(legacy_args)
 
-    def test_prune_and_densify_keep_hybrid_tensors_aligned(self):
+    def test_prune_keeps_hybrid_tensors_aligned(self):
         model = seed_gaussian_core(GaussianModel(sh_degree=0))
         model.training_setup(build_training_args())
         model._primitive_type.data[0] = model.planar_logit_value
-        model._material_id[:, 0] = torch.arange(model.get_xyz.shape[0], device="cuda", dtype=torch.long)
-        model._planarity[:, 0] = torch.linspace(0.0, 1.0, model.get_xyz.shape[0], device="cuda")
+        model._material_id[:, 0] = torch.arange(model.get_xyz.shape[0], dtype=torch.long)
+        model._planarity[:, 0] = torch.linspace(0.0, 1.0, model.get_xyz.shape[0])
         model._normal.data = model.get_normals().detach().clone()
 
-        grads = torch.ones((model.get_xyz.shape[0], 1), device="cuda")
-        model.densify_and_clone(grads, grad_threshold=0.0, split_clone_size=10.0)
-        cloned_count = model.get_xyz.shape[0]
-        self.assertEqual(model._material_id.shape[0], cloned_count)
-        self.assertEqual(model._primitive_type.shape[0], cloned_count)
-        self.assertEqual(model.get_region_type.shape[0], cloned_count)
-
-        model._scaling.data[:] = 0.0
-        model.densify_and_split(grads=torch.ones((cloned_count, 1), device="cuda"), grad_threshold=0.0, split_clone_size=0.5, N=2)
-        self.assertEqual(model.get_xyz.shape[0], model._normal.shape[0])
-        self.assertEqual(model.get_xyz.shape[0], model._material_id.shape[0])
-        self.assertEqual(model.get_xyz.shape[0], model._planarity.shape[0])
-        self.assertEqual(model.get_xyz.shape[0], model.get_region_type.shape[0])
-
-        prune_mask = torch.zeros((model.get_xyz.shape[0],), dtype=torch.bool, device="cuda")
+        prune_mask = torch.zeros((model.get_xyz.shape[0],), dtype=torch.bool)
         prune_mask[0] = True
         model.prune_points(prune_mask)
         self.assertEqual(model.get_xyz.shape[0], model._primitive_type.shape[0])
@@ -159,8 +141,8 @@ class HybridGaussianModelTests(unittest.TestCase):
     def test_effective_rotation_and_planar_thickness_clamp(self):
         model = seed_gaussian_core(GaussianModel(sh_degree=0))
         model._primitive_type.data[0] = model.planar_logit_value
-        model._normal.data[0] = torch.tensor([1.0, 0.0, 0.0], device="cuda")
-        model._scaling.data[0] = torch.log(torch.tensor([0.2, 0.2, 0.2], device="cuda"))
+        model._normal.data[0] = torch.tensor([1.0, 0.0, 0.0])
+        model._scaling.data[0] = torch.log(torch.tensor([0.2, 0.2, 0.2]))
         model.planar_thickness_max = 0.01
 
         normals = model.get_normals()
@@ -173,17 +155,16 @@ class HybridGaussianModelTests(unittest.TestCase):
     def test_ct_model_post_step_preserves_nonplanar_active_path(self):
         model = seed_gaussian_core(CTGaussianModel(sh_degree=0))
         model.training_setup(build_training_args())
-        model._primitive_type.data[:2] = torch.tensor([[2.0], [-2.0]], device="cuda")
+        model._primitive_type.data[:2] = torch.tensor([[2.0], [-2.0]])
         model._region_type[:, 0] = 0
         model.surface_thickness_max = 0.03
         model.post_optimizer_step(2000)
-        self.assertFalse(model.primitive_types_hardened)
         self.assertTrue(model._primitive_type.requires_grad)
         self.assertLessEqual(float(model.get_scaling[:, 2].max().detach()), 0.030001)
 
     def test_ct_bundle_initialization_and_ply_roundtrip(self):
         analysis_path, metadata_path = self._write_phase1_bundle()
-        model = CTGaussianModel(sh_degree=0)
+        model = CTGaussianModel(sh_degree=0, device="cpu")
         model.create_from_phase1_bundle(analysis_path, metadata_path, spatial_lr_scale=1.0)
 
         planar_mask = model.get_is_planar.squeeze(-1)
@@ -197,7 +178,7 @@ class HybridGaussianModelTests(unittest.TestCase):
         ply_path = self.temp_dir / "hybrid.ply"
         model.save_ply(str(ply_path))
 
-        reloaded = CTGaussianModel(sh_degree=0)
+        reloaded = CTGaussianModel(sh_degree=0, device="cpu")
         reloaded.load_ply(str(ply_path))
         self.assertTrue(torch.allclose(reloaded._primitive_type, model._primitive_type))
         self.assertTrue(torch.allclose(reloaded.get_normals(), model.get_normals(), atol=1e-5))
@@ -205,16 +186,13 @@ class HybridGaussianModelTests(unittest.TestCase):
         self.assertTrue(torch.allclose(reloaded._planarity, model._planarity))
         self.assertTrue(torch.equal(reloaded.get_region_type, model.get_region_type))
 
-    def test_old_ply_load_defaults_to_ct_metadata(self):
+    def test_old_ply_without_ct_metadata_is_rejected(self):
         old_ply_path = self.temp_dir / "old_style.ply"
         self._write_old_style_ply(old_ply_path)
 
-        model = CTGaussianModel(sh_degree=0)
-        model.load_ply(str(old_ply_path))
-        self.assertTrue(torch.all(model.get_is_planar == 0))
-        self.assertTrue(torch.all(model._material_id == -1))
-        self.assertTrue(torch.allclose(model._planarity, torch.zeros_like(model._planarity)))
-        self.assertTrue(torch.all(model.get_region_type == 0))
+        model = CTGaussianModel(sh_degree=0, device="cpu")
+        with self.assertRaisesRegex(ValueError, "required CTGS metadata"):
+            model.load_ply(str(old_ply_path))
 
     def _write_phase1_bundle(self):
         analysis_path = self.temp_dir / "analysis.npz"
@@ -253,19 +231,19 @@ class HybridGaussianModelTests(unittest.TestCase):
         )
         np.savez_compressed(
             analysis_path,
-            coarse_support_mask=np.ones((2, 2, 2), dtype=bool),
+            coarse_support_mask=np.pad(np.ones((6, 6, 6), dtype=bool), 1),
             support_threshold=np.array([0.5], dtype=np.float32),
-            material_mask=np.ones((2, 2, 2), dtype=bool),
-            void_mask=np.zeros((2, 2, 2), dtype=bool),
-            foreground_mask=np.ones((2, 2, 2), dtype=bool),
-            material_label_volume=np.ones((2, 2, 2), dtype=np.int32),
+            material_mask=np.pad(np.ones((6, 6, 6), dtype=bool), 1),
+            void_mask=np.zeros((8, 8, 8), dtype=bool),
+            foreground_mask=np.pad(np.ones((6, 6, 6), dtype=bool), 1),
+            material_label_volume=np.pad(np.ones((6, 6, 6), dtype=np.int32), 1),
             boundary_points=boundary_points,
             boundary_normals=boundary_normals,
             boundary_tangent_u=boundary_tangent_u,
             boundary_tangent_v=boundary_tangent_v,
             boundary_strength=np.array([[0.9], [0.8], [0.7]], dtype=np.float32),
             boundary_material_id=np.zeros((boundary_points.shape[0], 1), dtype=np.int64),
-            interior_points=np.array([[0.5, 0.5, 0.5]], dtype=np.float32),
+            interior_points=np.array([[4.5, 4.5, 4.5]], dtype=np.float32),
             interior_density_seed=np.array([[0.8]], dtype=np.float32),
             interior_material_id=np.array([[0]], dtype=np.int64),
         )

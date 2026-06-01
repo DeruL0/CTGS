@@ -18,8 +18,6 @@ setup(
                 "ext.cpp",
                 "boundary_field.cu",
                 "local_query.cu",
-                "neighbor_index.cu",
-                "plane_ops.cpp",
                 "query_density.cu",
                 "render_slice_patch.cu",
                 "signed_field.cu",

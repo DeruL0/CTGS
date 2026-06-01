@@ -7,8 +7,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from ct_pipeline.acceleration import ClipPlaneManager, LODManager, OccupancyGrid
-from ct_pipeline.compression import GSCompressor
+from ct_pipeline.runtime import ClipPlaneManager, GSCompressor, LODManager, OccupancyGrid
 
 
 class DummyCTGaussianModel:

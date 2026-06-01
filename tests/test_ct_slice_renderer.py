@@ -4,7 +4,7 @@ from importlib import util as importlib_util
 import numpy as np
 import torch
 
-from ct_pipeline.ct_slice_renderer import (
+from ct_pipeline.rendering.slices import (
     CTPatchGridCache,
     build_ct_patch_renderer,
     prepare_ct_render_state,
@@ -40,7 +40,7 @@ class DummyGaussians:
 class CTSliceRendererTests(unittest.TestCase):
     def setUp(self):
         self.gaussians = DummyGaussians(
-            xyz=torch.tensor([[4.0, 4.0, 4.0]], dtype=torch.float32),
+            xyz=torch.tensor([[4.5, 4.5, 4.5]], dtype=torch.float32),
             scaling=torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.float32),
             rotation=torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
             opacity=torch.tensor([[1.0]], dtype=torch.float32),

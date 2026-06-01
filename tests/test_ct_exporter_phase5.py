@@ -9,7 +9,7 @@ import torch
 from plyfile import PlyData
 from torch import nn
 
-from ct_pipeline.ct_exporter import CTExporter
+from ct_pipeline.exporting import CTExporter
 from mesher import meshing_ct
 from scene.ct_gaussian_model import CTGaussianModel
 
@@ -180,17 +180,16 @@ class CTExporterPhase5Tests(unittest.TestCase):
         vertex_count = len(PlyData.read(str(output_path)).elements[0].data)
         self.assertEqual(vertex_count, 2)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required to load exported hybrid PLYs into CTGaussianModel.")
     def test_export_display_gs_round_trips_into_ct_gaussian_model(self):
         model = build_single_material_model()
         output_path = self.exporter.export_display_gs(model, self.temp_dir / "display_roundtrip.ply", compress=False)
-        reloaded = CTGaussianModel(sh_degree=1)
+        reloaded = CTGaussianModel(sh_degree=1, device="cpu")
         reloaded.load_ply(str(output_path))
         self.assertEqual(reloaded.get_xyz.shape[0], model.get_xyz.shape[0])
 
     def test_export_metrology_mesh_single_material_is_nonempty(self):
         model = build_single_material_model()
-        output_path = self.exporter.export_metrology_mesh(model, self.temp_dir / "mesh_single", resolution=0.2)
+        output_path = self.exporter.export_metrology_mesh(model, self.temp_dir / "mesh_single", resolution=0.2, method="density")
         ply = PlyData.read(str(output_path))
         self.assertGreater(len(ply["vertex"].data), 0)
         self.assertGreater(len(ply["face"].data), 0)
@@ -198,7 +197,7 @@ class CTExporterPhase5Tests(unittest.TestCase):
 
     def test_export_metrology_mesh_multi_material_preserves_labels(self):
         model = build_multi_material_model()
-        output_path = self.exporter.export_metrology_mesh(model, self.temp_dir / "mesh_multi", resolution=0.2)
+        output_path = self.exporter.export_metrology_mesh(model, self.temp_dir / "mesh_multi", resolution=0.2, method="density")
         ply = PlyData.read(str(output_path))
         labels = np.unique(np.asarray(ply["vertex"].data["material_id"], dtype=np.int32))
         self.assertGreaterEqual(labels.size, 2)
@@ -226,7 +225,7 @@ class CTExporterPhase5Tests(unittest.TestCase):
 class MeshingCTPhase5Tests(unittest.TestCase):
     def test_meshing_ct_accepts_dataset_none_and_refines_boundary_region(self):
         model = build_multi_material_model()
-        mesh = meshing_ct(None, model, resolution=0.35, threshold=0.25)
+        mesh = meshing_ct(None, model, resolution=0.35, threshold=0.25, method="density")
         self.assertTrue(mesh["boundary_refined"])
         self.assertGreater(mesh["faces"].shape[0], mesh["coarse_face_count"])
         self.assertGreater(mesh["vertices"].shape[0], 0)

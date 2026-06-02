@@ -78,6 +78,7 @@ def _budgeted_repair_components(
                 training_state,
                 config,
                 apply_gate=False,
+                chunk_points=chunk_size,
             )
             density_parts.append(den.detach().cpu().to(dtype=torch.float32).numpy())
         sampled_density = np.concatenate(density_parts, axis=0) if density_parts else np.zeros((0,), dtype=np.float32)
@@ -126,23 +127,27 @@ def _probe_candidate_inside_material(
     support_radius: float | None = None,
     signed_distance_field: dict | None = None,
     q_support: float = DEFAULT_BULK_CONTAINMENT_Q_SUPPORT,
+    probe_directions: torch.Tensor | None = None,
 ):
     center = torch.as_tensor(center, dtype=torch.float32, device=support_mask_t.device).reshape(1, 3)
     scales = torch.as_tensor(scales, dtype=torch.float32, device=support_mask_t.device).reshape(3)
     rotation = torch.as_tensor(rotation, dtype=torch.float32, device=support_mask_t.device).reshape(3, 3)
     sqrt_q = math.sqrt(max(float(q_support), 1e-8))
-    offsets = []
-    for direction in ellipsoid_probe_directions():
-        local_dir = torch.as_tensor(direction, dtype=torch.float32, device=support_mask_t.device)
-        offset = rotation @ (sqrt_q * scales * local_dir)
-        offsets.extend((offset, -offset))
+    if probe_directions is None:
+        probe_directions = torch.as_tensor(
+            ellipsoid_probe_directions(),
+            dtype=torch.float32,
+            device=support_mask_t.device,
+        )
+    else:
+        probe_directions = probe_directions.to(device=support_mask_t.device, dtype=torch.float32)
+    signed_directions = torch.cat((probe_directions, -probe_directions), dim=0)
+    offsets = (sqrt_q * scales.reshape(1, 3) * signed_directions) @ rotation.transpose(0, 1)
     if support_radius is not None:
         radius = max(float(support_radius), 1e-8)
-        offsets = [
-            offset * min(1.0, radius / max(float(torch.linalg.norm(offset).item()), 1e-8))
-            for offset in offsets
-        ]
-    probes = torch.cat((center, center + torch.stack(offsets, dim=0)), dim=0)
+        norms = torch.linalg.norm(offsets, dim=1, keepdim=True).clamp_min(1e-8)
+        offsets = offsets * torch.clamp(radius / norms, max=1.0)
+    probes = torch.cat((center, center + offsets), dim=0)
     if signed_distance_field is not None:
         sdf = sample_volume_field(
             signed_distance_field["signed_distance"],
@@ -162,6 +167,76 @@ def _sdf_inside_np(points_xyz: np.ndarray, signed_distance_field: dict, device) 
     ).reshape(-1)
     inside = torch.isfinite(sdf) & (sdf < 0.0)
     return inside.detach().cpu().numpy().astype(bool, copy=False)
+
+
+def _directional_clearance_sides_torch(
+    center,
+    directions,
+    signed_distance_field: dict,
+    device,
+    max_distances,
+    step_distance: float,
+) -> np.ndarray:
+    max_distances_np = np.asarray(max_distances, dtype=np.float32).reshape(-1)
+    directions_np = np.asarray(directions, dtype=np.float32).reshape(-1, 3)
+    if max_distances_np.size == 0:
+        return np.zeros((0,), dtype=np.float32)
+
+    active_np = np.isfinite(max_distances_np) & (max_distances_np > 0.0)
+    clearances = np.zeros_like(max_distances_np, dtype=np.float32)
+    if not np.any(active_np):
+        return clearances
+
+    sdf_volume = signed_distance_field["signed_distance"]
+    spacing = signed_distance_field["spacing_zyx"]
+    dtype = sdf_volume.dtype if torch.is_tensor(sdf_volume) and torch.is_floating_point(sdf_volume) else torch.float32
+    center_t = torch.as_tensor(np.asarray(center, dtype=np.float32).reshape(1, 3), device=device, dtype=dtype)
+    directions_t = torch.as_tensor(directions_np, device=device, dtype=dtype)
+    max_distances_t = torch.as_tensor(max_distances_np, device=device, dtype=dtype)
+    active = torch.as_tensor(active_np, device=device, dtype=torch.bool)
+    step_distance = max(float(step_distance), 1e-6)
+    steps = torch.ceil(max_distances_t / float(step_distance)).to(dtype=torch.long).clamp_min(1)
+    max_steps = int(steps[active].max().item())
+    step_ids = torch.arange(max_steps, device=device, dtype=torch.long)
+    denom = (steps - 1).clamp_min(1).to(dtype=dtype).reshape(-1, 1)
+    distances = float(step_distance) + step_ids.to(dtype=dtype).reshape(1, -1) * (
+        max_distances_t.reshape(-1, 1) - float(step_distance)
+    ) / denom
+    distances = torch.where(
+        (steps == 1).reshape(-1, 1),
+        torch.full_like(distances, float(step_distance)),
+        distances,
+    )
+    valid = active.reshape(-1, 1) & (step_ids.reshape(1, -1) < steps.reshape(-1, 1))
+    probes = center_t.reshape(1, 1, 3) + distances.reshape(-1, max_steps, 1) * directions_t.reshape(-1, 1, 3)
+    sdf = sample_volume_field(sdf_volume, probes.reshape(-1, 3), spacing).reshape(-1, max_steps)
+    inside = torch.isfinite(sdf) & (sdf < 0.0) & valid
+    outside = (~inside) & valid
+    has_outside = outside.any(dim=1) & active
+    first_out = torch.argmax(outside.to(dtype=torch.int32), dim=1).to(dtype=torch.long)
+    side_ids = torch.arange(max_distances_t.shape[0], device=device, dtype=torch.long)
+    high = distances[side_ids, first_out]
+    prev_out = (first_out - 1).clamp_min(0)
+    low = torch.where(first_out == 0, torch.zeros_like(high), distances[side_ids, prev_out])
+    low = torch.where(has_outside, low, max_distances_t)
+    high = torch.where(has_outside, high, max_distances_t)
+
+    for _ in range(5):
+        search = has_outside
+        if not bool(torch.any(search).item()):
+            break
+        mid = 0.5 * (low + high)
+        probe = center_t + mid.reshape(-1, 1) * directions_t
+        sdf_mid = sample_volume_field(sdf_volume, probe[search], spacing).reshape(-1)
+        inside_mid = torch.isfinite(sdf_mid) & (sdf_mid < 0.0)
+        search_ids = torch.nonzero(search, as_tuple=False).reshape(-1)
+        low = low.clone()
+        high = high.clone()
+        low[search_ids] = torch.where(inside_mid, mid[search_ids], low[search_ids])
+        high[search_ids] = torch.where(inside_mid, high[search_ids], mid[search_ids])
+
+    clearances[active_np] = low.detach().cpu().numpy()[active_np].astype(np.float32, copy=False)
+    return clearances
 
 
 def _directional_clearance_one_side_torch(
@@ -224,6 +299,8 @@ def _clearance_cap_candidate_scales(
     step_distance = max(0.35 * float(min_spacing), 1e-6)
     capped = desired.copy()
     limited = False
+    directions = []
+    max_distances = []
     for axis in range(3):
         scale = float(desired[axis])
         if scale <= 0.0 or not np.isfinite(scale):
@@ -231,22 +308,29 @@ def _clearance_cap_candidate_scales(
             limited = True
             continue
         max_distance = scale * sqrt_q / safety
-        c_pos = _directional_clearance_one_side_torch(
+        directions.extend((rotation_np[:, axis], -rotation_np[:, axis]))
+        max_distances.extend((max_distance, max_distance))
+
+    if directions:
+        clearances = _directional_clearance_sides_torch(
             center_np,
-            rotation_np[:, axis],
+            np.stack(directions, axis=0),
             signed_distance_field,
             device,
-            max_distance,
+            np.asarray(max_distances, dtype=np.float32),
             step_distance,
         )
-        c_neg = _directional_clearance_one_side_torch(
-            center_np,
-            -rotation_np[:, axis],
-            signed_distance_field,
-            device,
-            max_distance,
-            step_distance,
-        )
+    else:
+        clearances = np.zeros((0,), dtype=np.float32)
+
+    clearance_cursor = 0
+    for axis in range(3):
+        scale = float(desired[axis])
+        if scale <= 0.0 or not np.isfinite(scale):
+            continue
+        c_pos = float(clearances[clearance_cursor])
+        c_neg = float(clearances[clearance_cursor + 1])
+        clearance_cursor += 2
         safe_scale = safety * min(c_pos, c_neg) / sqrt_q
         capped_axis = min(scale, max(float(safe_scale), 0.0))
         if capped_axis < 0.999 * scale:
@@ -401,8 +485,17 @@ def _apply_budgeted_component_bulk_repair(
         bulk_rotations = quaternion_to_matrix(gaussians.get_rotation.detach()[bulk_mask]).to(dtype=torch.float32)
         bulk_opacity = gaussians.get_opacity.detach()[bulk_mask].reshape(-1).to(dtype=torch.float32)
         bulk_xyz_np = bulk_xyz.cpu().numpy().astype(np.float32, copy=False)
+        bulk_scales_np = bulk_scales.detach().cpu().numpy().astype(np.float32, copy=True)
+        bulk_rotations_np = bulk_rotations.detach().cpu().numpy().astype(np.float32, copy=False)
+        opacity_np = bulk_opacity.detach().cpu().numpy().astype(np.float32, copy=False)
+        bulk_center_normals = getattr(training_state, "bulk_center_normals", None)
+        if isinstance(bulk_center_normals, torch.Tensor) and bulk_center_normals.shape[0] == bulk_xyz.shape[0]:
+            bulk_center_normals_np = bulk_center_normals.detach().cpu().numpy().astype(np.float32, copy=False)
+        else:
+            bulk_center_normals_np = None
         bulk_tree = cKDTree(bulk_xyz_np)
         support_mask_t = as_device_tensor(material_mask_np, device=device, dtype=torch.bool)
+        probe_directions_t = torch.as_tensor(ellipsoid_probe_directions(), dtype=torch.float32, device=device)
 
         max_ratio = float(getattr(args, "ct_bulk_reseed_max_gaussian_ratio", 2.5))
         max_count = int(math.floor(max(1, int(initial_gaussian_count)) * max_ratio))
@@ -457,15 +550,14 @@ def _apply_budgeted_component_bulk_repair(
                 nearby_distances, nearby_ids = bulk_tree.query(center_np, k=query_k)
                 nearby_distances = np.asarray(nearby_distances, dtype=np.float32).reshape(-1)
                 nearby_ids = np.asarray(nearby_ids, dtype=np.int64).reshape(-1)
-                opacity_np = bulk_opacity.detach().cpu().numpy().astype(np.float32, copy=False)
                 sort_ids = np.lexsort((nearby_distances, -opacity_np[nearby_ids]))
                 expanded = False
                 for nearby_bulk in nearby_ids[sort_ids].tolist():
                     nearby_bulk = int(nearby_bulk)
                     if nearby_bulk in expanded_bulk_ids:
                         continue
-                    scales_np = bulk_scales[nearby_bulk].cpu().numpy().astype(np.float32, copy=True)
-                    rotation_np = bulk_rotations[nearby_bulk].cpu().numpy().astype(np.float32, copy=False)
+                    scales_np = bulk_scales_np[nearby_bulk].copy()
+                    rotation_np = bulk_rotations_np[nearby_bulk]
                     bbox_distance = np.maximum(
                         np.maximum(points_np.min(axis=0) - bulk_xyz_np[nearby_bulk], bulk_xyz_np[nearby_bulk] - points_np.max(axis=0)),
                         0.0,
@@ -475,11 +567,11 @@ def _apply_budgeted_component_bulk_repair(
                     opacity = float(opacity_np[nearby_bulk])
                     if opacity < 0.05:
                         continue
-                    bulk_center = torch.as_tensor(bulk_xyz_np[nearby_bulk], dtype=dtype, device=device).reshape(1, 3)
-                    sdf_normal = _sample_sdf_normals_for_reseed(bulk_center, signed_distance_field)[0].detach().cpu().numpy()
-                    center_sdf = sample_volume_field(
-                        signed_distance_field["signed_distance"], bulk_center, signed_distance_field["spacing_zyx"]
-                    ).reshape(-1).to(dtype=torch.float32)
+                    if bulk_center_normals_np is not None:
+                        sdf_normal = bulk_center_normals_np[nearby_bulk]
+                    else:
+                        bulk_center = torch.as_tensor(bulk_xyz_np[nearby_bulk], dtype=dtype, device=device).reshape(1, 3)
+                        sdf_normal = _sample_sdf_normals_for_reseed(bulk_center, signed_distance_field)[0].detach().cpu().numpy()
                     normal_axis = int(np.argmax(np.abs(rotation_np.T @ sdf_normal)))
                     tangent_axes = [axis for axis in range(3) if axis != normal_axis]
                     local_direction = rotation_np.T @ (center_np - bulk_xyz_np[nearby_bulk])
@@ -488,6 +580,35 @@ def _apply_budgeted_component_bulk_repair(
                     scale_cap = max(float(scales_np.max()), float(scales_np.min()) * stretch_max_ratio)
                     stretched_scales[tangent_axes[0]] = min(stretched_scales[tangent_axes[0]] * stretch_factor, scale_cap)
                     stretched_scales[tangent_axes[1]] = min(stretched_scales[tangent_axes[1]] * stretch_secondary_factor, scale_cap)
+                    optimistic_radius = max(3.0 * float(stretched_scales.max()), 2.0 * min_spacing)
+                    optimistic_gain_mask = (
+                        np.linalg.norm(points_np - bulk_xyz_np[nearby_bulk].reshape(1, 3), axis=1)
+                        <= optimistic_radius
+                    )
+                    if not np.any(optimistic_gain_mask):
+                        skipped_gain += 1
+                        continue
+                    old_density = _gaussian_density_np(
+                        points_np[optimistic_gain_mask],
+                        bulk_xyz_np[nearby_bulk],
+                        scales_np,
+                        rotation_np,
+                        opacity,
+                    )
+                    optimistic_density = _gaussian_density_np(
+                        points_np[optimistic_gain_mask],
+                        bulk_xyz_np[nearby_bulk],
+                        stretched_scales,
+                        rotation_np,
+                        opacity,
+                    )
+                    optimistic_delta = np.maximum(0.0, optimistic_density - old_density)
+                    optimistic_residual = residual[optimistic_gain_mask]
+                    optimistic_residual_sum = max(float(optimistic_residual.sum()), 1e-8)
+                    optimistic_gain = float(np.minimum(optimistic_residual, optimistic_delta).sum())
+                    if optimistic_gain / optimistic_residual_sum < gain_ratio_min:
+                        skipped_gain += 1
+                        continue
                     stretched_scales, limited_by_clearance = _clearance_cap_candidate_scales(
                         bulk_xyz_np[nearby_bulk],
                         stretched_scales,
@@ -516,6 +637,7 @@ def _apply_budgeted_component_bulk_repair(
                             tangent_factor=probe_tangent_factor,
                             signed_distance_field=signed_distance_field,
                             q_support=q_cont,
+                            probe_directions=probe_directions_t,
                         ):
                             break
                         stretched_scales[tangent_axes] = np.maximum(
@@ -553,6 +675,7 @@ def _apply_budgeted_component_bulk_repair(
                     gaussians._scaling[bulk_indices[nearby_bulk]] = torch.log(
                         torch.as_tensor(stretched_scales, dtype=gaussians._scaling.dtype, device=device).clamp_min(1e-8)
                     )
+                    bulk_scales_np[nearby_bulk] = stretched_scales
                     bulk_scales[nearby_bulk] = torch.as_tensor(stretched_scales, dtype=bulk_scales.dtype, device=device)
                     density_grid[
                         local_indices[gain_mask, 0],
@@ -616,6 +739,7 @@ def _apply_budgeted_component_bulk_repair(
                     tangent_factor=probe_tangent_factor,
                     signed_distance_field=signed_distance_field,
                     q_support=q_cont,
+                    probe_directions=probe_directions_t,
                 ):
                     break
                 scales[:2] *= probe_shrink

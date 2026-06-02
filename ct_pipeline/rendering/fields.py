@@ -478,6 +478,21 @@ def _query_density_with_q_cutoff(
     support_extent=None,
     q_cut: float,
 ) -> torch.Tensor:
+    if spatial_grid is not None and support_extent is not None and query_points.is_cuda:
+        from ct_pipeline.backend import has_ct_native_qcut_density_query, query_ct_density_qcut_native
+
+        if has_ct_native_qcut_density_query():
+            return query_ct_density_qcut_native(
+                means,
+                rotations,
+                scales,
+                opacity,
+                query_points,
+                spatial_grid=spatial_grid,
+                support_extent=support_extent,
+                q_cut=float(q_cut),
+            ).to(dtype=torch.float32)
+
     zeros = torch.zeros((query_points.shape[0],), dtype=torch.float32, device=query_points.device)
     query_ids, gaussian_ids = _query_local_candidate_pairs(
         means,
@@ -570,6 +585,28 @@ def _query_bulk_intensity_field(
         points_chunk: torch.Tensor,
         membership_chunk: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if spatial_grid is not None and support_extent is not None and points_chunk.is_cuda:
+            from ct_pipeline.backend import has_ct_native_bulk_intensity_query, query_bulk_intensity_native
+
+            if has_ct_native_bulk_intensity_query():
+                return query_bulk_intensity_native(
+                    means,
+                    rotations,
+                    bulk_scales,
+                    bulk_opacity,
+                    attenuation,
+                    center_sdf,
+                    center_normals,
+                    points_chunk,
+                    spatial_grid=spatial_grid,
+                    support_extent=support_extent,
+                    q_cut=float(q_cut),
+                    tau=float(tau),
+                    skip_depth=float(skip_depth),
+                    material_membership=membership_chunk,
+                    apply_gate=bool(apply_gate),
+                )
+
         zeros_chunk = torch.zeros((points_chunk.shape[0],), dtype=torch.float32, device=points_chunk.device)
         query_ids, gaussian_ids = _query_local_candidate_pairs(
             means,
@@ -645,9 +682,55 @@ def query_bulk_anisotropic_density(
     apply_gate: bool = False,
     material_membership: torch.Tensor | None = None,
     return_raw: bool = False,
+    chunk_points: int | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Query the same anisotropic bulk kernel used by bulk A_b readout."""
     points_xyz = _as_query_points(points_xyz, training_state.xyz.dtype, training_state.xyz.device)
+    if not bool(apply_gate) and material_membership is None and not bool(return_raw):
+        means = getattr(training_state, "bulk_xyz", None)
+        zeros = torch.zeros((points_xyz.shape[0],), dtype=torch.float32, device=points_xyz.device)
+        if means is None or means.numel() == 0 or points_xyz.numel() == 0:
+            return zeros
+        opacity = getattr(training_state, "bulk_opacity", None)
+        if opacity is None or opacity.numel() == 0:
+            opacity = torch.ones((means.shape[0],), dtype=means.dtype, device=means.device)
+        else:
+            opacity = opacity.to(device=means.device, dtype=means.dtype).reshape(-1).clamp(0.0, 1.0)
+
+        rotations = getattr(training_state, "bulk_rotation_mats")
+        scales = getattr(training_state, "bulk_scales").clamp_min(1e-6)
+        spatial_grid = getattr(training_state, "bulk_spatial_grid", None)
+        support_extent = getattr(training_state, "bulk_support_extent", None)
+        q_cut = resolve_bulk_containment_q(config)
+        native_available = False
+        if spatial_grid is not None and support_extent is not None and points_xyz.is_cuda:
+            from ct_pipeline.backend import has_ct_native_qcut_density_query
+
+            native_available = has_ct_native_qcut_density_query()
+
+        if chunk_points is None:
+            chunk_points = 65536 if native_available else int(_config_float(config, "ct_bulk_intensity_query_chunk_points", 512))
+        chunk_points = max(1, int(chunk_points))
+
+        def _query_density_chunk(points_chunk: torch.Tensor) -> torch.Tensor:
+            return _query_density_with_q_cutoff(
+                means,
+                rotations,
+                scales,
+                opacity,
+                points_chunk,
+                spatial_grid=spatial_grid,
+                support_extent=support_extent,
+                q_cut=float(q_cut),
+            ).to(dtype=torch.float32)
+
+        if points_xyz.shape[0] <= chunk_points:
+            return _query_density_chunk(points_xyz)
+        return torch.cat(
+            [_query_density_chunk(points_xyz[start : start + chunk_points]) for start in range(0, int(points_xyz.shape[0]), chunk_points)],
+            dim=0,
+        )
+
     raw, den = _query_bulk_intensity_field(
         training_state,
         points_xyz,

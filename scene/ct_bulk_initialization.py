@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
@@ -11,7 +13,12 @@ from ct_pipeline.rendering.bulk_support import (
     DEFAULT_BULK_CONTAINMENT_Q_SUPPORT,
     ellipsoid_probe_directions,
 )
-from ct_pipeline.geometry.coordinates import world_xyz_to_voxel_float_numpy, world_xyz_to_voxel_indices_floor_numpy
+from ct_pipeline.geometry.coordinates import (
+    world_xyz_to_voxel_float_numpy,
+    world_xyz_to_voxel_float_torch,
+    world_xyz_to_voxel_indices_floor_numpy,
+    world_xyz_to_voxel_indices_floor_torch,
+)
 
 CT_DENSE_INIT_SURFACE_THICKNESS_RATIO = 0.4
 CT_DENSE_INIT_SURFACE_TANGENT_RATIO = 0.7
@@ -48,6 +55,7 @@ CT_FEATURE_ADAPTIVE_PROBE_TANGENT_SHRINK = 0.75
 CT_FEATURE_ADAPTIVE_PROBE_ITERS = 4
 CT_FEATURE_ADAPTIVE_CLEARANCE_Q_CONT = DEFAULT_BULK_CONTAINMENT_Q_SUPPORT
 CT_FEATURE_ADAPTIVE_CLEARANCE_SAFETY = DEFAULT_BULK_CLEARANCE_SAFETY
+CT_FEATURE_ADAPTIVE_CUDA_CHUNK_SIZE = 16384
 
 
 def _build_contained_lattice_points(
@@ -327,21 +335,34 @@ def _build_feature_adaptive_bulk_attributes(
     geom_normal_sigma = 0.6 * float(min_spacing)
     grad_normal_sigma = 0.7 * float(min_spacing)
     min_normal = 0.30 * float(min_spacing)
-    for index in range(count):
-        if geo_score[index] >= 0.35 and geo_score[index] >= grad_score[index]:
-            normal = sdf_grad[index]
-            normal_sigma = min(geom_normal_sigma, max(0.95 * float(inside_vox[index]) * float(min_spacing), min_normal))
-        elif grad_score[index] >= 0.75:
-            normal = intensity_grad[index]
-            normal_sigma = grad_normal_sigma
-        else:
-            continue
-        if np.linalg.norm(normal) <= 1e-8:
-            continue
-        tangent_u, tangent_v, normal = _build_frame_from_normal(normal)
-        rotations[index] = np.stack((tangent_u, tangent_v, normal), axis=1)
-        normals[index] = normal
-        scales[index] = np.array([tangent_sigma[index], tangent_sigma[index], normal_sigma], dtype=np.float32)
+    geometry_aligned = (geo_score >= 0.35) & (geo_score >= grad_score)
+    gradient_aligned = ~geometry_aligned & (grad_score >= 0.75)
+    aligned = geometry_aligned | gradient_aligned
+    candidate_normals = np.where(geometry_aligned[:, None], sdf_grad, intensity_grad)
+    candidate_norms = np.linalg.norm(candidate_normals, axis=1)
+    aligned &= candidate_norms > 1e-8
+    if np.any(aligned):
+        indices = np.nonzero(aligned)[0]
+        normal = candidate_normals[indices] / candidate_norms[indices, None]
+        tangent_hint = np.repeat(np.array([[1.0, 0.0, 0.0]], dtype=np.float32), indices.shape[0], axis=0)
+        tangent_hint[np.abs(normal[:, 0]) > 0.9] = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        tangent_u = tangent_hint - np.sum(tangent_hint * normal, axis=1, keepdims=True) * normal
+        tangent_u /= np.linalg.norm(tangent_u, axis=1, keepdims=True).clip(min=1e-8)
+        tangent_v = np.cross(normal, tangent_u)
+        tangent_v /= np.linalg.norm(tangent_v, axis=1, keepdims=True).clip(min=1e-8)
+        tangent_u = np.cross(tangent_v, normal)
+        tangent_u /= np.linalg.norm(tangent_u, axis=1, keepdims=True).clip(min=1e-8)
+        rotations[indices] = np.stack((tangent_u, tangent_v, normal), axis=2)
+        normals[indices] = normal
+        normal_sigma = np.full((indices.shape[0],), grad_normal_sigma, dtype=np.float32)
+        geometry_indices = geometry_aligned[indices]
+        normal_sigma[geometry_indices] = np.minimum(
+            geom_normal_sigma,
+            np.maximum(0.95 * inside_vox[indices[geometry_indices]] * float(min_spacing), min_normal),
+        )
+        scales[indices, 0] = tangent_sigma[indices]
+        scales[indices, 1] = tangent_sigma[indices]
+        scales[indices, 2] = normal_sigma
     return scales.astype(np.float32), rotations.astype(np.float32), normals.astype(np.float32)
 
 
@@ -379,6 +400,199 @@ def _points_inside_domain(points_xyz, material_mask_volume, spacing_zyx, signed_
     if signed_distance_volume is not None:
         return _sample_sdf_trilinear_numpy(points_xyz, signed_distance_volume, spacing_zyx) < 0.0
     return _points_inside_mask(points_xyz, material_mask_volume, spacing_zyx)
+
+
+def _sample_sdf_trilinear_torch(points_xyz, signed_distance_volume, spacing_zyx):
+    """Sample SDF on CUDA using the same voxel-center convention as training."""
+
+    points = torch.as_tensor(points_xyz)
+    sdf = torch.as_tensor(signed_distance_volume, device=points.device, dtype=torch.float32)
+    points = points.to(device=sdf.device, dtype=sdf.dtype).reshape(-1, 3)
+    if points.shape[0] == 0:
+        return torch.empty((0,), dtype=sdf.dtype, device=sdf.device)
+    depth, height, width = [int(value) for value in sdf.shape]
+    x_idx, y_idx, z_idx = world_xyz_to_voxel_float_torch(points, spacing_zyx)
+    in_bounds = (
+        (x_idx >= 0.0)
+        & (x_idx <= float(width - 1))
+        & (y_idx >= 0.0)
+        & (y_idx <= float(height - 1))
+        & (z_idx >= 0.0)
+        & (z_idx <= float(depth - 1))
+    )
+    x_norm = torch.zeros_like(x_idx) if width <= 1 else 2.0 * x_idx / float(width - 1) - 1.0
+    y_norm = torch.zeros_like(y_idx) if height <= 1 else 2.0 * y_idx / float(height - 1) - 1.0
+    z_norm = torch.zeros_like(z_idx) if depth <= 1 else 2.0 * z_idx / float(depth - 1) - 1.0
+    grid = torch.stack((x_norm, y_norm, z_norm), dim=-1).reshape(1, -1, 1, 1, 3)
+    sampled = F.grid_sample(
+        sdf.reshape(1, 1, depth, height, width),
+        grid,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    ).reshape(-1)
+    return torch.where(in_bounds, sampled, torch.full_like(sampled, 1e6))
+
+
+def _points_inside_domain_torch(points_xyz, material_mask_volume, spacing_zyx, signed_distance_volume=None):
+    points = torch.as_tensor(points_xyz).reshape(-1, 3)
+    if signed_distance_volume is not None:
+        return _sample_sdf_trilinear_torch(points, signed_distance_volume, spacing_zyx) < 0.0
+    mask = torch.as_tensor(material_mask_volume, device=points.device, dtype=torch.bool)
+    depth, height, width = [int(value) for value in mask.shape]
+    spacing_z, spacing_y, spacing_x = [max(float(value), 1e-8) for value in spacing_zyx]
+    x_idx = torch.floor(points[:, 0] / spacing_x).to(dtype=torch.long)
+    y_idx = torch.floor(points[:, 1] / spacing_y).to(dtype=torch.long)
+    z_idx = torch.floor(points[:, 2] / spacing_z).to(dtype=torch.long)
+    in_bounds = (
+        (x_idx >= 0)
+        & (x_idx < width)
+        & (y_idx >= 0)
+        & (y_idx < height)
+        & (z_idx >= 0)
+        & (z_idx < depth)
+    )
+    inside = torch.zeros((points.shape[0],), dtype=torch.bool, device=points.device)
+    if bool(in_bounds.any()):
+        inside[in_bounds] = mask[z_idx[in_bounds], y_idx[in_bounds], x_idx[in_bounds]]
+    return inside
+
+
+def _directional_clearance_sides_torch(
+    centers,
+    directions,
+    max_distances,
+    material_mask_volume,
+    spacing_zyx,
+    step_distance,
+    *,
+    signed_distance_volume=None,
+):
+    centers = torch.as_tensor(centers, dtype=torch.float32).reshape(-1, 3)
+    device = centers.device
+    directions = F.normalize(torch.as_tensor(directions, device=device, dtype=torch.float32).reshape(-1, 3), dim=1)
+    max_distances = torch.as_tensor(max_distances, device=device, dtype=torch.float32).reshape(-1)
+    clearances = torch.zeros_like(max_distances)
+    active = max_distances > 0.0
+    if not bool(active.any()):
+        return clearances
+    centers = centers[active]
+    directions = directions[active]
+    active_max = max_distances[active]
+    steps = torch.ceil(active_max / max(float(step_distance), 1e-6)).to(dtype=torch.long).clamp_min_(1)
+    max_steps = int(steps.max().item())
+    step_indices = torch.arange(max_steps, device=device, dtype=torch.float32).reshape(1, -1)
+    denom = (steps - 1).clamp_min(1).to(dtype=torch.float32).reshape(-1, 1)
+    distances = float(step_distance) + step_indices * (active_max.reshape(-1, 1) - float(step_distance)) / denom
+    distances = torch.where(
+        (steps == 1).reshape(-1, 1),
+        torch.full_like(distances, float(step_distance)),
+        distances,
+    )
+    valid = step_indices < steps.reshape(-1, 1)
+    probes = centers[:, None, :] + distances[:, :, None] * directions[:, None, :]
+    inside = _points_inside_domain_torch(
+        probes.reshape(-1, 3),
+        material_mask_volume,
+        spacing_zyx,
+        signed_distance_volume=signed_distance_volume,
+    ).reshape(-1, max_steps)
+    outside = valid & ~inside
+    has_outside = outside.any(dim=1)
+    first_outside = outside.to(dtype=torch.int64).argmax(dim=1)
+    row_indices = torch.arange(centers.shape[0], device=device)
+    high = torch.where(has_outside, distances[row_indices, first_outside], active_max)
+    previous = (first_outside - 1).clamp_min(0)
+    low = torch.where(has_outside & (first_outside > 0), distances[row_indices, previous], torch.zeros_like(high))
+    low = torch.where(has_outside, low, active_max)
+    for _ in range(5):
+        mid = 0.5 * (low + high)
+        mid_inside = _points_inside_domain_torch(
+            centers + mid[:, None] * directions,
+            material_mask_volume,
+            spacing_zyx,
+            signed_distance_volume=signed_distance_volume,
+        )
+        low = torch.where(mid_inside, mid, low)
+        high = torch.where(mid_inside, high, mid)
+    clearances[active] = low
+    return clearances
+
+
+def _apply_directional_clearance_scales_torch(
+    interior_points,
+    bulk_scales,
+    bulk_rotations,
+    material_mask_volume,
+    spacing_zyx,
+    min_spacing,
+    *,
+    signed_distance_volume=None,
+    q_cont,
+    safety,
+):
+    device = torch.device("cuda")
+    points = torch.as_tensor(interior_points, device=device, dtype=torch.float32).reshape(-1, 3)
+    scales = torch.as_tensor(bulk_scales, device=device, dtype=torch.float32).reshape(-1, 3).clone()
+    rotations = torch.as_tensor(bulk_rotations, device=device, dtype=torch.float32).reshape(-1, 3, 3)
+    domain_sdf = (
+        None
+        if signed_distance_volume is None
+        else torch.as_tensor(signed_distance_volume, device=device, dtype=torch.float32)
+    )
+    domain_mask = (
+        None
+        if material_mask_volume is None
+        else torch.as_tensor(material_mask_volume, device=device, dtype=torch.bool)
+    )
+    sqrt_q = math.sqrt(max(float(q_cont), 1e-8))
+    safety = max(float(safety), 1e-6)
+    step_distance = max(0.35 * float(min_spacing), 1e-6)
+    limited_chunks = []
+    ratio_chunks = []
+    result_chunks = []
+    for start in range(0, points.shape[0], CT_FEATURE_ADAPTIVE_CUDA_CHUNK_SIZE):
+        end = min(start + CT_FEATURE_ADAPTIVE_CUDA_CHUNK_SIZE, points.shape[0])
+        chunk_points = points[start:end]
+        chunk_scales = scales[start:end]
+        chunk_rotations = rotations[start:end]
+        center_inside = _points_inside_domain_torch(
+            chunk_points,
+            domain_mask,
+            spacing_zyx,
+            signed_distance_volume=domain_sdf,
+        )
+        directions = chunk_rotations.transpose(1, 2).reshape(-1, 3)
+        directions = torch.cat((directions, -directions), dim=0)
+        desired = chunk_scales.reshape(-1)
+        max_distances = desired * sqrt_q / safety
+        centers = chunk_points[:, None, :].expand(-1, 3, -1).reshape(-1, 3)
+        centers = torch.cat((centers, centers), dim=0)
+        clearances = _directional_clearance_sides_torch(
+            centers,
+            directions,
+            max_distances.repeat(2),
+            domain_mask,
+            spacing_zyx,
+            step_distance,
+            signed_distance_volume=domain_sdf,
+        )
+        safe_scales = safety * torch.minimum(clearances[: desired.shape[0]], clearances[desired.shape[0] :]) / sqrt_q
+        new_scales = torch.minimum(desired, safe_scales.clamp_min(0.0)).reshape(-1, 3)
+        new_scales = torch.where(center_inside[:, None], new_scales, torch.zeros_like(new_scales))
+        ratios = new_scales / chunk_scales.clamp_min(1e-8)
+        limited_chunks.append((new_scales < 0.999 * chunk_scales).any(dim=1))
+        ratio_chunks.append(ratios)
+        result_chunks.append(new_scales)
+    result = torch.cat(result_chunks, dim=0)
+    ratios = torch.cat(ratio_chunks, dim=0).reshape(-1)
+    limited = torch.cat(limited_chunks, dim=0)
+    stats = {
+        "num_init_candidates_clearance_limited": int(limited.sum().item()),
+        "init_clearance_scale_ratio_p10": float(torch.quantile(ratios, 0.10).item()),
+        "init_clearance_scale_ratio_p50": float(torch.quantile(ratios, 0.50).item()),
+    }
+    return result.cpu().numpy().astype(np.float32, copy=False), stats
 
 
 def _directional_clearance_one_side(
@@ -437,6 +651,7 @@ def _apply_directional_clearance_scales(
     signed_distance_volume=None,
     q_cont: float = CT_FEATURE_ADAPTIVE_CLEARANCE_Q_CONT,
     safety: float = CT_FEATURE_ADAPTIVE_CLEARANCE_SAFETY,
+    use_cuda: bool | None = None,
 ):
     points = np.asarray(interior_points, dtype=np.float32).reshape(-1, 3)
     scales = np.asarray(bulk_scales, dtype=np.float32).reshape(-1, 3).copy()
@@ -448,6 +663,18 @@ def _apply_directional_clearance_scales(
     }
     if points.shape[0] == 0 or (material_mask_volume is None and signed_distance_volume is None):
         return scales.astype(np.float32), stats
+    if bool(torch.cuda.is_available() if use_cuda is None else use_cuda):
+        return _apply_directional_clearance_scales_torch(
+            points,
+            scales,
+            rotations,
+            material_mask_volume,
+            spacing_zyx,
+            min_spacing,
+            signed_distance_volume=signed_distance_volume,
+            q_cont=q_cont,
+            safety=safety,
+        )
     sqrt_q = math.sqrt(max(float(q_cont), 1e-8))
     safety = max(float(safety), 1e-6)
     step_distance = max(0.35 * float(min_spacing), 1e-6)
@@ -543,6 +770,153 @@ def _probe_candidate_axes(
     return legal, axis_bad
 
 
+def _probe_candidate_axes_torch(
+    centers,
+    scales,
+    rotations,
+    material_mask_volume,
+    spacing_zyx,
+    *,
+    signed_distance_volume=None,
+    q_support,
+):
+    centers = torch.as_tensor(centers, dtype=torch.float32).reshape(-1, 3)
+    device = centers.device
+    scales = torch.as_tensor(scales, device=device, dtype=torch.float32).reshape(-1, 3)
+    rotations = torch.as_tensor(rotations, device=device, dtype=torch.float32).reshape(-1, 3, 3)
+    directions = torch.tensor(ellipsoid_probe_directions(), device=device, dtype=torch.float32)
+    signed_directions = torch.stack((directions, -directions), dim=1).reshape(-1, 3)
+    affected_axes = directions.abs() > 1e-5
+    sqrt_q = math.sqrt(max(float(q_support), 1e-8))
+    local_offsets = sqrt_q * scales[:, None, :] * signed_directions[None, :, :]
+    world_offsets = torch.bmm(local_offsets, rotations.transpose(1, 2))
+    probes = torch.cat((centers[:, None, :], centers[:, None, :] + world_offsets), dim=1)
+    inside = _points_inside_domain_torch(
+        probes.reshape(-1, 3),
+        material_mask_volume,
+        spacing_zyx,
+        signed_distance_volume=signed_distance_volume,
+    ).reshape(centers.shape[0], -1)
+    pairs_inside = inside[:, 1:].reshape(centers.shape[0], directions.shape[0], 2).all(dim=2)
+    axis_bad = ((~pairs_inside)[:, :, None] & affected_axes[None, :, :]).any(dim=1)
+    legal = inside[:, 0] & ~axis_bad.any(dim=1)
+    return legal, axis_bad
+
+
+def _sample_sdf_floor_torch(points_xyz, signed_distance_volume, spacing_zyx):
+    points = torch.as_tensor(points_xyz, dtype=torch.float32).reshape(-1, 3)
+    sdf = torch.as_tensor(signed_distance_volume, device=points.device, dtype=torch.float32)
+    z_idx, y_idx, x_idx = world_xyz_to_voxel_indices_floor_torch(points, spacing_zyx, shape_dhw=tuple(sdf.shape))
+    return sdf[z_idx, y_idx, x_idx]
+
+
+def _probe_correct_feature_adaptive_bulk_attributes_torch(
+    interior_points,
+    bulk_scales,
+    bulk_rotations,
+    bulk_normals,
+    signed_distance_volume,
+    material_mask_volume,
+    spacing_zyx,
+    min_spacing,
+    *,
+    normal_shrink,
+    tangent_shrink,
+    max_iters,
+    q_support,
+):
+    device = torch.device("cuda")
+    points = torch.as_tensor(interior_points, device=device, dtype=torch.float32).reshape(-1, 3)
+    scales = torch.as_tensor(bulk_scales, device=device, dtype=torch.float32).reshape(-1, 3).clone()
+    rotations = torch.as_tensor(bulk_rotations, device=device, dtype=torch.float32).reshape(-1, 3, 3).clone()
+    normals = torch.as_tensor(bulk_normals, device=device, dtype=torch.float32).reshape(-1, 3).clone()
+    sdf = torch.as_tensor(signed_distance_volume, device=device, dtype=torch.float32)
+    keep = torch.ones((points.shape[0],), device=device, dtype=torch.bool)
+    changed = torch.zeros_like(keep)
+    min_scale = max(0.08 * float(min_spacing), 1e-8)
+
+    legal, axis_bad = _probe_candidate_axes_torch(
+        points,
+        scales,
+        rotations,
+        material_mask_volume,
+        spacing_zyx,
+        signed_distance_volume=sdf,
+        q_support=q_support,
+    )
+    for _ in range(max(int(max_iters), 0)):
+        active = ~legal
+        if not bool(active.any()):
+            break
+        active_bad = axis_bad[active]
+        active_scales = scales[active]
+        active_scales[:, 2] = torch.where(
+            active_bad[:, 2],
+            (active_scales[:, 2] * float(normal_shrink)).clamp_min(min_scale),
+            active_scales[:, 2],
+        )
+        active_scales[:, :2] = torch.where(
+            active_bad[:, :2],
+            (active_scales[:, :2] * float(tangent_shrink)).clamp_min(min_scale),
+            active_scales[:, :2],
+        )
+        scales[active] = active_scales
+        changed[active] = True
+        active_legal, active_axis_bad = _probe_candidate_axes_torch(
+            points[active],
+            scales[active],
+            rotations[active],
+            material_mask_volume,
+            spacing_zyx,
+            signed_distance_volume=sdf,
+            q_support=q_support,
+        )
+        legal[active] = active_legal
+        axis_bad[active] = active_axis_bad
+
+    failed = ~legal
+    downgraded = torch.zeros_like(keep)
+    if bool(failed.any()):
+        inside_distance = (-_sample_sdf_floor_torch(points[failed], sdf, spacing_zyx)).clamp_min(0.0)
+        radii = torch.minimum(torch.full_like(inside_distance, 0.60 * float(min_spacing)), 0.70 * inside_distance)
+        fallback_possible = radii > min_scale
+        if bool(fallback_possible.any()):
+            failed_indices = torch.nonzero(failed, as_tuple=False).reshape(-1)
+            fallback_indices = failed_indices[fallback_possible]
+            fallback_scales = radii[fallback_possible, None].expand(-1, 3).clone()
+            fallback_rotations = torch.eye(3, device=device, dtype=torch.float32).reshape(1, 3, 3).expand(fallback_indices.shape[0], -1, -1)
+            fallback_legal, _ = _probe_candidate_axes_torch(
+                points[fallback_indices],
+                fallback_scales,
+                fallback_rotations,
+                material_mask_volume,
+                spacing_zyx,
+                signed_distance_volume=sdf,
+                q_support=q_support,
+            )
+            accepted_indices = fallback_indices[fallback_legal]
+            if accepted_indices.shape[0] > 0:
+                scales[accepted_indices] = fallback_scales[fallback_legal]
+                rotations[accepted_indices] = fallback_rotations[fallback_legal]
+                normals[accepted_indices] = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=torch.float32)
+                legal[accepted_indices] = True
+                downgraded[accepted_indices] = True
+    keep &= legal
+    stats = {
+        "num_init_candidates_total": int(points.shape[0]),
+        "num_init_candidates_shrunk": int((changed & legal & ~downgraded).sum().item()),
+        "num_init_candidates_downgraded": int(downgraded.sum().item()),
+        "num_init_candidates_rejected": int((~keep).sum().item()),
+    }
+    return (
+        scales.cpu().numpy().astype(np.float32, copy=False),
+        rotations.cpu().numpy().astype(np.float32, copy=False),
+        normals.cpu().numpy().astype(np.float32, copy=False),
+        keep.cpu().numpy(),
+        stats,
+    )
+
+
 def _probe_correct_feature_adaptive_bulk_attributes(
     interior_points,
     bulk_scales,
@@ -557,6 +931,7 @@ def _probe_correct_feature_adaptive_bulk_attributes(
     tangent_shrink: float = CT_FEATURE_ADAPTIVE_PROBE_TANGENT_SHRINK,
     max_iters: int = CT_FEATURE_ADAPTIVE_PROBE_ITERS,
     q_support: float = CT_FEATURE_ADAPTIVE_CLEARANCE_Q_CONT,
+    use_cuda: bool | None = None,
 ):
     points = np.asarray(interior_points, dtype=np.float32).reshape(-1, 3)
     scales = np.asarray(bulk_scales, dtype=np.float32).reshape(-1, 3).copy()
@@ -570,6 +945,21 @@ def _probe_correct_feature_adaptive_bulk_attributes(
     }
     if points.shape[0] == 0 or (material_mask_volume is None and signed_distance_volume is None):
         return scales, rotations, normals, np.ones((points.shape[0],), dtype=bool), stats
+    if bool(torch.cuda.is_available() if use_cuda is None else use_cuda):
+        return _probe_correct_feature_adaptive_bulk_attributes_torch(
+            points,
+            scales,
+            rotations,
+            normals,
+            signed_distance_volume,
+            material_mask_volume,
+            spacing_zyx,
+            min_spacing,
+            normal_shrink=normal_shrink,
+            tangent_shrink=tangent_shrink,
+            max_iters=max_iters,
+            q_support=q_support,
+        )
 
     sdf_values, _ = _sample_sdf_and_gradient_at_points(points, signed_distance_volume, spacing_zyx)
     keep = np.ones((points.shape[0],), dtype=bool)

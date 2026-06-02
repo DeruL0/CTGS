@@ -17,6 +17,7 @@ setup(
             sources=[
                 "ext.cpp",
                 "boundary_field.cu",
+                "bulk_intensity_query.cu",
                 "local_query.cu",
                 "query_density.cu",
                 "render_slice_patch.cu",

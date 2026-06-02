@@ -112,6 +112,72 @@ std::vector<torch::Tensor> query_density_local_backward_cuda(
     torch::Tensor query_gaussian_ids,
     torch::Tensor grad_output);
 
+std::vector<torch::Tensor> query_density_qcut_local_forward_cuda(
+    torch::Tensor means,
+    torch::Tensor rotations,
+    torch::Tensor scales,
+    torch::Tensor opacity,
+    torch::Tensor support_extent,
+    torch::Tensor query_points,
+    torch::Tensor grid_world_min,
+    torch::Tensor grid_dims,
+    double cell_size,
+    torch::Tensor cell_offsets,
+    torch::Tensor cell_gaussian_ids,
+    double q_cut);
+
+std::vector<torch::Tensor> query_density_qcut_local_backward_cuda(
+    torch::Tensor means,
+    torch::Tensor rotations,
+    torch::Tensor scales,
+    torch::Tensor opacity,
+    torch::Tensor query_points,
+    torch::Tensor query_offsets,
+    torch::Tensor query_gaussian_ids,
+    torch::Tensor grad_output);
+
+std::vector<torch::Tensor> query_bulk_intensity_local_forward_cuda(
+    torch::Tensor means,
+    torch::Tensor rotations,
+    torch::Tensor scales,
+    torch::Tensor opacity,
+    torch::Tensor attenuation,
+    torch::Tensor center_sdf,
+    torch::Tensor center_normals,
+    torch::Tensor material_membership,
+    torch::Tensor support_extent,
+    torch::Tensor query_points,
+    torch::Tensor grid_world_min,
+    torch::Tensor grid_dims,
+    double cell_size,
+    torch::Tensor cell_offsets,
+    torch::Tensor cell_gaussian_ids,
+    double q_cut,
+    double tau,
+    double skip_depth,
+    bool apply_gate,
+    bool has_membership);
+
+std::vector<torch::Tensor> query_bulk_intensity_local_backward_cuda(
+    torch::Tensor means,
+    torch::Tensor rotations,
+    torch::Tensor scales,
+    torch::Tensor opacity,
+    torch::Tensor attenuation,
+    torch::Tensor center_sdf,
+    torch::Tensor center_normals,
+    torch::Tensor material_membership,
+    torch::Tensor query_points,
+    torch::Tensor query_offsets,
+    torch::Tensor query_gaussian_ids,
+    torch::Tensor grad_raw,
+    torch::Tensor grad_den,
+    double q_cut,
+    double tau,
+    double skip_depth,
+    bool apply_gate,
+    bool has_membership);
+
 std::vector<torch::Tensor> build_uniform_grid_cuda(
     torch::Tensor cell_min,
     torch::Tensor cell_max,
@@ -185,6 +251,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "query_density_local_backward",
         &query_density_local_backward_cuda,
         "CT native local density query backward (CUDA)");
+    m.def(
+        "query_density_qcut_local_forward",
+        &query_density_qcut_local_forward_cuda,
+        "CT native local q-cut density query forward (CUDA)");
+    m.def(
+        "query_density_qcut_local_backward",
+        &query_density_qcut_local_backward_cuda,
+        "CT native local q-cut density query backward (CUDA)");
+    m.def(
+        "query_bulk_intensity_local_forward",
+        &query_bulk_intensity_local_forward_cuda,
+        "CT native local bulk intensity query forward (CUDA)");
+    m.def(
+        "query_bulk_intensity_local_backward",
+        &query_bulk_intensity_local_backward_cuda,
+        "CT native local bulk intensity query backward (CUDA)");
     m.def(
         "build_uniform_grid_cuda",
         &build_uniform_grid_cuda,

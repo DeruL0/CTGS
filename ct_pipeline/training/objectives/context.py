@@ -10,8 +10,6 @@ class CTLossTerms:
     volume: torch.Tensor
     occupancy: torch.Tensor
     surface: torch.Tensor
-    false_hole: torch.Tensor
-    false_hole_metrics: dict
 
     @property
     def render(self) -> torch.Tensor:

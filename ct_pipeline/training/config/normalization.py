@@ -271,9 +271,6 @@ def _normalize_internal_geometry_args(args) -> None:
     args.ct_false_hole_target_occupancy = float(
         getattr(args, "ct_false_hole_target_occupancy", CT_FALSE_HOLE_TARGET_OCCUPANCY)
     )
-    args.ct_false_hole_metrics_interval = int(
-        getattr(args, "ct_false_hole_metrics_interval", CT_FALSE_HOLE_METRICS_INTERVAL)
-    )
     args.ct_freeze_bulk_xyz = bool(getattr(args, "ct_freeze_bulk_xyz", CT_FREEZE_BULK_XYZ))
     args.ct_bulk_continuous_init = bool(getattr(args, "ct_bulk_continuous_init", CT_BULK_CONTINUOUS_INIT))
     args.ct_freeze_primitive_type = CT_FREEZE_PRIMITIVE_TYPE

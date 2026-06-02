@@ -14,12 +14,6 @@ from ct_pipeline.training.sampling import (
 from ct_pipeline.training.utils import as_device_tensor
 
 
-def _support_mask_from_analysis(analysis: dict):
-    if not isinstance(analysis, dict):
-        return None
-    return analysis.get("coarse_support_mask", analysis.get("material_mask"))
-
-
 def _phase_mask_from_analysis(analysis: dict):
     if not isinstance(analysis, dict):
         return None
@@ -41,12 +35,6 @@ def _sample_support_membership(support_mask, points_xyz: torch.Tensor, spacing_z
     y_index = torch.floor(points_xyz[:, 1] / spacing_y).to(dtype=torch.long).clamp(0, max(height - 1, 0))
     z_index = torch.floor(points_xyz[:, 2] / spacing_z).to(dtype=torch.long).clamp(0, max(depth - 1, 0))
     return mask[z_index, y_index, x_index].to(dtype=torch.float32).reshape(-1)
-
-
-def _support_membership_gate(support_membership: torch.Tensor | None, reference: torch.Tensor) -> torch.Tensor | None:
-    if support_membership is None:
-        return None
-    return (support_membership.to(device=reference.device, dtype=torch.float32).reshape(-1) >= 0.5).to(dtype=torch.float32)
 
 
 def _split_phase_occupancy_sample_counts(args, sample_count: int) -> tuple[int, int, int]:

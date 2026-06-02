@@ -54,8 +54,6 @@ def build_parser() -> ArgumentParser:
                         help="Margin in voxels for surface phase loss (inside/outside pushes)")
     parser.add_argument("--ct_surface_phase_temp_vox", type=float, default=0.1,
                         help="Softplus temperature for phase loss")
-    parser.add_argument("--ct_surface_normal_smooth_weight", type=float, default=0.05)
-    parser.add_argument("--ct_surface_anchor_weight", type=float, default=0.01)
     # confidence map config
     parser.add_argument("--ct_confidence_mode", type=str, default="auto_percentile",
                         choices=["auto_percentile", "static_threshold"])
@@ -169,7 +167,6 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--ct_false_hole_material_threshold", type=float, default=CT_FALSE_HOLE_MATERIAL_THRESHOLD)
     parser.add_argument("--ct_false_hole_dark_margin", type=float, default=CT_FALSE_HOLE_DARK_MARGIN)
     parser.add_argument("--ct_false_hole_target_occupancy", type=float, default=CT_FALSE_HOLE_TARGET_OCCUPANCY)
-    parser.add_argument("--ct_false_hole_metrics_interval", type=int, default=CT_FALSE_HOLE_METRICS_INTERVAL)
     parser.add_argument("--ct_bulk_max_scale", type=float, default=2.0)
     parser.add_argument("--ct_bulk_augment_factor", type=float, default=2.0)
     parser.add_argument("--ct_bulk_continuous_init", action=BooleanOptionalAction, default=CT_BULK_CONTINUOUS_INIT)

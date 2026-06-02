@@ -214,8 +214,6 @@ def _validate_surface_and_bulk_args(args) -> None:
         raise ValueError("--ct_false_hole_dark_margin must be >= 0.")
     if args.ct_false_hole_target_occupancy < 0.0 or args.ct_false_hole_target_occupancy > 1.0:
         raise ValueError("--ct_false_hole_target_occupancy must be in [0, 1].")
-    if args.ct_false_hole_metrics_interval < 0:
-        raise ValueError("--ct_false_hole_metrics_interval must be >= 0.")
     if args.ct_densify_from_iter < 0 or args.ct_densify_until_iter < 0:
         raise ValueError("CT densify iteration bounds must be >= 0.")
     if args.ct_densify_interval <= 0:

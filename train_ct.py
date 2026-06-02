@@ -194,11 +194,7 @@ def training_ct(dataset, opt, saving_iterations, checkpoint_iterations, checkpoi
                 tb_writer.add_scalar("ct_loss/render", loss_terms.render.item(), iteration)
                 tb_writer.add_scalar("ct_loss/occupancy", loss_terms.occupancy.item(), iteration)
                 tb_writer.add_scalar("ct_loss/surface", loss_terms.surface.item(), iteration)
-                tb_writer.add_scalar("ct_loss/false_hole", loss_terms.false_hole.item(), iteration)
                 tb_writer.add_scalar("ct_loss/total", loss.item(), iteration)
-                for metric_name, metric_value in loss_terms.false_hole_metrics.items():
-                    if isinstance(metric_value, (int, float)) and np.isfinite(float(metric_value)):
-                        tb_writer.add_scalar(f"ct_false_hole/{metric_name}", float(metric_value), iteration)
                 if getattr(args, "ct_enable_densification", False):
                     tb_writer.add_scalar("ct_loss_effective/volume_lambda", effective_weights.volume, iteration)
                     tb_writer.add_scalar("ct_loss_effective/occupancy_lambda", effective_weights.occupancy, iteration)
@@ -558,13 +554,9 @@ def training_ct(dataset, opt, saving_iterations, checkpoint_iterations, checkpoi
                 "render_loss": loss_terms.render.item(),
                 "occupancy_loss": loss_terms.occupancy.item(),
                 "surface_loss": loss_terms.surface.item(),
-                "false_hole_loss": loss_terms.false_hole.item(),
                 "t": total_computing_time,
                 "num_gaussian": len(gaussians.get_xyz),
             }
-            for metric_name, metric_value in loss_terms.false_hole_metrics.items():
-                if isinstance(metric_value, (int, float)) and np.isfinite(float(metric_value)):
-                    wandb_logs[f"false_hole/{metric_name}"] = float(metric_value)
             gpu_memory = ct_log_gpu_memory()
             if gpu_memory is not None:
                 wandb_logs["gpu"] = gpu_memory

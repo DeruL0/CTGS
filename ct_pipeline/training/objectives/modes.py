@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 from ct_pipeline.rendering.fields import is_bulk_intensity_field_mode
 from ct_pipeline.training.control.optimizer import (
     _attenuation_only_bulk_gate_training_enabled,

@@ -4,8 +4,9 @@ import torch
 import torch.nn.functional as F
 
 from ct_pipeline.rendering.fields import density_to_occupancy, query_ct_density_from_state_by_region, query_ct_fields_unified
-from ct_pipeline.training.bootstrap import CTTrainingBootstrap, _sample_coarse_sdf_normals
-from ct_pipeline.training.losses import sample_volume_field, surface_sdf_thickness_loss
+from ct_pipeline.training.bootstrap.analysis import _sample_coarse_sdf_normals
+from ct_pipeline.training.bootstrap.context import CTTrainingBootstrap
+from ct_pipeline.training.losses import sample_volume_field
 from ct_pipeline.training.objectives.bulk_losses import _material_membership_at
 from ct_pipeline.training.objectives.sampling import _sample_filtered_from_candidate_sets
 from ct_pipeline.training.utils import as_device_tensor
@@ -121,15 +122,15 @@ def surface_phase_loss(
     args,
     training_state,
     *,
-    mat_conf_pts: torch.Tensor | None = None,
-    air_conf_pts: torch.Tensor | None = None,
+    material_phase_pts: torch.Tensor | None = None,
+    air_phase_pts: torch.Tensor | None = None,
     sample_count: int = 4096,
 ) -> torch.Tensor:
-    """Phase loss for surface primitives using confidence-map supervision.
+    """Phase loss for surface primitives using Phase 1 material/air samples.
 
     Pushes surface signed-distance D_s:
-      - below -margin at confident-material points
-      - above +margin at confident-air points
+      - below -margin at material-side points
+      - above +margin at air-side points
 
     Uses softplus so loss is zero when the constraint is already satisfied.
     Gradient flows only to surface parameters (p_i, n_i).
@@ -157,17 +158,16 @@ def surface_phase_loss(
         violation = sign * D_s + margin
         return F.softplus(violation / temp).mean()
 
-    # fall back to phase1 SDF-based sampling if no confidence pts given
-    if mat_conf_pts is None and context.field_pools.get("support") is not None:
-        mat_conf_pts, _ = _sample_filtered_from_candidate_sets(
+    if material_phase_pts is None and context.field_pools.get("support") is not None:
+        material_phase_pts, _ = _sample_filtered_from_candidate_sets(
             (context.field_pools.get("material_deep_pool"), context.field_pools.get("support")),
             sample_count // 2,
             context,
             device=device,
             signed_distance_predicate=lambda sdf: sdf < -0.5,
         )
-    if air_conf_pts is None:
-        air_conf_pts, _ = _sample_filtered_from_candidate_sets(
+    if air_phase_pts is None:
+        air_phase_pts, _ = _sample_filtered_from_candidate_sets(
             (context.field_pools.get("void_air"), context.field_pools.get("exterior_air_near_band")),
             sample_count // 2,
             context,
@@ -175,8 +175,8 @@ def surface_phase_loss(
             signed_distance_predicate=lambda sdf: sdf > 0.5,
         )
 
-    t_mat = _phase_term(mat_conf_pts, +1.0)  # inside: D_s < -margin
-    t_air = _phase_term(air_conf_pts, -1.0)  # outside: D_s > +margin
+    t_mat = _phase_term(material_phase_pts, +1.0)  # inside: D_s < -margin
+    t_air = _phase_term(air_phase_pts, -1.0)  # outside: D_s > +margin
     for t in (t_mat, t_air):
         if t is not None and torch.isfinite(t):
             terms.append(t)

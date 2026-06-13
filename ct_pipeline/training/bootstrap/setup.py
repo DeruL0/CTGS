@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ct_pipeline.backend import prepare_ct_training_state
-from ct_pipeline.data import CTVolumeLoader
+from ct_pipeline.backend.core import prepare_ct_training_state
+from ct_pipeline.data.loader import CTVolumeLoader
 from ct_pipeline.rendering.bulk_support import resolve_bulk_query_truncation_sigma
 from ct_pipeline.training.bootstrap.analysis import (
     _ct_spatial_extent,
@@ -32,7 +32,7 @@ from ct_pipeline.training.sampling import (
 )
 from ct_pipeline.training.session import build_renderer_autocast_kwargs, prepare_output_and_logger
 from ct_pipeline.training.utils import as_device_tensor, write_key_value_report
-from scene import CTGaussianModel
+from scene.ct_gaussian_model import CTGaussianModel
 
 def _run_ct_init_preflight(
     gaussians,
@@ -52,7 +52,7 @@ def _run_ct_init_preflight(
         grid_cell_voxels=int(getattr(args, "ct_grid_cell_voxels", 8)),
         signed_distance_field=signed_distance_field,
     )
-    from ct_pipeline.training.reporting import _compute_surface_drift_diagnostics
+    from ct_pipeline.training.reporting.surface_drift import _compute_surface_drift_diagnostics
 
     metrics = _compute_surface_drift_diagnostics(
         training_state,

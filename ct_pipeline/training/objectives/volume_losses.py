@@ -6,8 +6,8 @@ import torch.nn.functional as F
 
 from ct_pipeline.rendering.fields import query_ct_fields_unified
 from ct_pipeline.rendering.slices import _build_query_points_from_base, sample_gt_slice_patch
-from ct_pipeline.training.bootstrap import CTTrainingBootstrap
-from ct_pipeline.training.control import (
+from ct_pipeline.training.bootstrap.context import CTTrainingBootstrap
+from ct_pipeline.training.control.optimizer import (
     _attenuation_only_bulk_gate_training_enabled,
     _attenuation_only_training_enabled,
 )

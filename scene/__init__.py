@@ -1,4 +1,3 @@
-from .ct_gaussian_model import CTGaussianModel
-from .gaussian_model import GaussianModel
+"""Scene package namespace."""
 
-__all__ = ["CTGaussianModel", "GaussianModel"]
+__all__: list[str] = []

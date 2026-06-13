@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 
 from ct_pipeline.rendering.slices import (
-    CTRenderState,
     _normalize_patch_parameters,
     _normalize_axis,
     _resolve_render_state,

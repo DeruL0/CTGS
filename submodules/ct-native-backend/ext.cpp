@@ -214,10 +214,6 @@ std::vector<torch::Tensor> surface_thickness_loss_backward_cuda(
     double max_thickness,
     torch::Tensor grad_output);
 
-torch::Tensor build_signed_field_cuda(
-    torch::Tensor material_mask,
-    int64_t band_voxels);
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "render_slice_patch_forward",
@@ -287,8 +283,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "surface_thickness_loss_backward",
         &surface_thickness_loss_backward_cuda,
         "CT surface thickness loss backward");
-    m.def(
-        "build_signed_field_cuda",
-        &build_signed_field_cuda,
-        "Build a truncated signed-distance-style field on CUDA");
 }

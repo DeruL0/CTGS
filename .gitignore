@@ -15,11 +15,19 @@ build/
 *.egg-info/
 submodules/ct-native-backend/build/
 
+tests/
+scripts/
+tools/
+
 output/
 outputs/
 paper/
 assets/
 data/
+!ct_pipeline/data/
+!ct_pipeline/data/**
+ct_pipeline/data/**/__pycache__/
+ct_pipeline/data/**/*.py[cod]
 fig/
 wandb/
 tensorboard_3d/

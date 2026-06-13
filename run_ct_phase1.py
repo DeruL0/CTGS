@@ -6,8 +6,9 @@ from pathlib import Path
 import numpy as np
 from scipy import ndimage
 
-from ct_pipeline.data import CTPreprocessor, CTVolumeLoader, build_support_signed_distance
-from ct_pipeline.geometry import GeometryAnalyzer
+from ct_pipeline.data.loader import CTVolumeLoader
+from ct_pipeline.data.preprocessing import CTPreprocessor, build_support_signed_distance
+from ct_pipeline.geometry.analysis import GeometryAnalyzer
 
 
 def _orthonormal_tangents_from_normals(normals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -138,7 +139,7 @@ def run_phase1(args: argparse.Namespace) -> None:
     if boundary_points.shape[0] == 0:
         raise RuntimeError("Intensity-driven surface seeding produced zero surface points.")
     interior_target_count = max(1, int(round(boundary_points.shape[0] * float(args.interior_points_ratio))))
-    interior_points, interior_density_seed, interior_material_id = preprocessor.sample_support_points(
+    interior_points, interior_density_seed, interior_material_id = preprocessor.sample_interior_points(
         support_mask,
         volume,
         spacing,

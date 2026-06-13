@@ -12,24 +12,18 @@ from scene.gaussian_model_io import (
 )
 from scene.gaussian_model_metadata import (
     default_device,
-    default_primitive_type_logits,
     derive_normals_from_rotations,
     freeze_primitive_type_parameter,
     initialize_hybrid_metadata,
     is_initialized,
     model_device,
-    primitive_type_requires_grad,
     rotation_matrices_from_quaternions,
-    sanitize_material_id,
-    sanitize_planarity,
-    sanitize_region_type,
 )
 from scene.gaussian_model_optimizer import (
     assign_parameter,
     cat_tensors_to_optimizer,
     densification_postfix,
     post_optimizer_step,
-    prune_optimizer,
     prune_points,
     replace_tensor_to_optimizer,
     reset_opacity,
@@ -37,7 +31,7 @@ from scene.gaussian_model_optimizer import (
     update_learning_rate,
 )
 from ct_pipeline.geometry.coordinates import world_xyz_to_voxel_indices_floor_numpy
-from utils.general_utils import build_scaling_rotation, inverse_sigmoid, strip_symmetric
+from utils.general_utils import inverse_sigmoid
 from utils.rotation_utils import matrix_to_quaternion
 
 
@@ -74,14 +68,8 @@ class GaussianModel:
         self.setup_functions()
 
     def setup_functions(self):
-        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
-            L = build_scaling_rotation(scaling_modifier * scaling, rotation)
-            actual_covariance = L @ L.transpose(1, 2)
-            return strip_symmetric(actual_covariance)
-
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
-        self.covariance_activation = build_covariance_from_scaling_rotation
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
         self.rotation_activation = torch.nn.functional.normalize
@@ -103,18 +91,6 @@ class GaussianModel:
 
     def is_initialized(self) -> bool:
         return is_initialized(self)
-
-    def _default_primitive_type_logits(self, count: int, device: torch.device) -> torch.Tensor:
-        return default_primitive_type_logits(self, count, device)
-
-    def _sanitize_material_id(self, material_id, count: int, device: torch.device, fill_value: int = -1) -> torch.Tensor:
-        return sanitize_material_id(self, material_id, count, device, fill_value=fill_value)
-
-    def _sanitize_planarity(self, planarity, count: int, device: torch.device, fill_value: float = 0.0) -> torch.Tensor:
-        return sanitize_planarity(self, planarity, count, device, fill_value=fill_value)
-
-    def _sanitize_region_type(self, region_type, count: int, device: torch.device, fill_value: int = 0) -> torch.Tensor:
-        return sanitize_region_type(self, region_type, count, device, fill_value=fill_value)
 
     def _rotation_matrices_from_quaternions(self, rotations: torch.Tensor) -> torch.Tensor:
         return rotation_matrices_from_quaternions(self, rotations)
@@ -184,9 +160,6 @@ class GaussianModel:
     def _freeze_primitive_type_parameter(self) -> None:
         freeze_primitive_type_parameter(self)
 
-    def _primitive_type_requires_grad(self) -> bool:
-        return primitive_type_requires_grad(self)
-
     def _assign_parameter(self, attr_name: str, tensor, optimizer_name: str | None = None, requires_grad: bool = True):
         return assign_parameter(self, attr_name, tensor, optimizer_name=optimizer_name, requires_grad=requires_grad)
 
@@ -240,10 +213,6 @@ class GaussianModel:
         return self._material_id
 
     @property
-    def get_planarity(self):
-        return self._planarity
-
-    @property
     def get_region_type(self):
         return self._region_type
 
@@ -258,11 +227,6 @@ class GaussianModel:
         if self._atten_logit.numel() == 0:
             return self._atten_logit
         return F.softplus(self._atten_logit)
-
-    @property
-    def get_bulk_offset(self):
-        """Bounded center offset for adaptive bulk mode.  Returns (N_bulk, 3) or empty."""
-        return self._bulk_offset
 
     @property
     def get_raw_scaling(self):
@@ -331,9 +295,6 @@ class GaussianModel:
         rotation_matrices[active_mask] = planar_rotation
         return matrix_to_quaternion(rotation_matrices)
 
-    def get_covariance(self, scaling_modifier=1):
-        return self.covariance_activation(self.get_scaling, scaling_modifier, self.get_effective_rotation())
-
     def training_setup(self, training_args):
         training_setup(self, training_args)
 
@@ -357,9 +318,6 @@ class GaussianModel:
 
     def replace_tensor_to_optimizer(self, tensor, name, requires_grad=True):
         return replace_tensor_to_optimizer(self, tensor, name, requires_grad=requires_grad)
-
-    def _prune_optimizer(self, mask):
-        return prune_optimizer(self, mask)
 
     def prune_points(self, mask):
         prune_points(self, mask)

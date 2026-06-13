@@ -1,6 +1,6 @@
 from argparse import ArgumentParser, BooleanOptionalAction
 
-from ct_pipeline.config import add_ct_model_args, add_ct_optimization_args
+from ct_pipeline.config.model_args import add_ct_model_args, add_ct_optimization_args
 from ct_pipeline.training.presets import CTTrainingArgumentParser, available_ct_training_presets
 
 from .defaults import *
@@ -54,7 +54,7 @@ def build_parser() -> ArgumentParser:
                         help="Margin in voxels for surface phase loss (inside/outside pushes)")
     parser.add_argument("--ct_surface_phase_temp_vox", type=float, default=0.1,
                         help="Softplus temperature for phase loss")
-    # confidence map config
+    # Reserved compatibility flags from the retired confidence-map path.
     parser.add_argument("--ct_confidence_mode", type=str, default="auto_percentile",
                         choices=["auto_percentile", "static_threshold"])
     parser.add_argument("--ct_conf_material_threshold", type=float, default=None)

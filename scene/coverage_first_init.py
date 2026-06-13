@@ -247,7 +247,6 @@ def apply_coverage_first_init(
     # --- Coverage diagnostics: sample points in material/shell/void, compute C(x) ---
     stats = {"strategy": strategy, "applied": True, "n_bulk": n_bulk}
     try:
-        from ct_pipeline.training.sampling import _sample_signed_distance  # noqa: F401
         # sample diagnostic points uniformly from voxel grid via a coarse random sampling around bulk centers
         sample_count = min(8192, int(new_xyz_full.shape[0]) * 4)
         if sample_count > 0:

@@ -1,8 +1,38 @@
-# CTGS
+# CTGS: Hybrid Gaussian Splatting for Compact Industrial CT Representation
 
-CTGS is a CT-only Gaussian representation pipeline for reconstructed volumes. It
-turns a CT volume into a role-separated 3D Gaussian model that can be trained,
-exported, meshed, and viewed.
+CTGS is a CT-only Gaussian representation pipeline for reconstructed industrial CT
+volumes. It turns a dense CT volume into a compact, role-separated 3D Gaussian
+model that can be trained, exported, meshed, and viewed.
+
+> Shuyang Zhu and Yukie Nagai. *CTGS: Hybrid Gaussian Splatting for Compact
+> Industrial CT Representation.* School of Engineering, The University of Tokyo.
+
+## Motivation
+
+Industrial CT produces dense voxel volumes that are faithful to material-air
+boundaries but expensive to store, stream, and analyze. A surface mesh makes the
+boundary explicit but discards the interior attenuation field, while a single
+undifferentiated Gaussian role tends to mix two different tasks — representing a
+thin material boundary and representing a volumetric material interior — which
+blurs material-air transitions and spreads attenuation into void regions.
+
+CTGS addresses this with a hybrid representation built from two complementary
+primitive roles:
+
+- **Surface Gaussians** (`region_type == 0`): thin, anisotropic primitives
+  aligned with material boundaries to represent surface geometry, normals, and
+  topology.
+- **Bulk Gaussians** (`region_type == 1`): compact volumetric primitives placed
+  inside material regions to represent the CT intensity field within the object.
+
+Given a reconstructed CT volume, CTGS initializes surface primitives from
+material boundaries and bulk primitives as a contained lattice inside the
+material domain, then optimizes the two branches with separated roles. The result
+is significant data reduction versus dense volumes while preserving surface
+geometry for downstream analysis and a compact bulk field for fast intensity
+visualization.
+
+## Pipeline Overview
 
 The pipeline is organized around one workflow:
 
@@ -11,16 +41,16 @@ The pipeline is organized around one workflow:
 3. train with the CT objective
 4. export the trained representation for display or downstream analysis
 
-A small legacy spherical-harmonics (SH) payload is retained for PLY/viewer
-compatibility, but it is frozen and is not an active CT training signal.
-
-## Pipeline Overview
+Capabilities:
 
 - CT volume loading from DICOM, RAW, and TIFF
-- Phase 1 preprocessing and boundary analysis
+- Phase 1 preprocessing and boundary analysis (material mask + signed distance field)
 - hybrid Gaussian initialization with surface and bulk roles
 - CT-only training in [`train_ct.py`](train_ct.py)
 - export through [`ct_pipeline/exporting/`](ct_pipeline/exporting)
+
+A small legacy spherical-harmonics (SH) payload is retained for PLY/viewer
+compatibility, but it is frozen and is not an active CT training signal.
 
 ## Repository Layout
 
@@ -34,10 +64,7 @@ compatibility, but it is frozen and is not an active CT training signal.
 - [`ct_pipeline/training/`](ct_pipeline/training): parser defaults, losses, sampling, densification, grid caching, and reporting
 - [`ct_pipeline/viewer/`](ct_pipeline/viewer): local viewer session loading and HTTP API
 - [`scene/`](scene): base Gaussian storage plus CT-specific initialization
-- [`tools/`](tools): reusable evaluation and comparison commands
-- [`scripts/`](scripts): reproducible diagnostics and ablation launchers
 - [`viewer/`](viewer): browser frontend source; generated `dist/` assets remain untracked
-- [`tests/`](tests): regression and contract tests for the CTGS path
 
 ## Representation
 
@@ -189,41 +216,6 @@ python mesher.py `
   --method density
 ```
 
-## Mesh Evaluation
+## License
 
-Evaluate an extracted mesh against the Phase 1 support boundary:
-
-```powershell
-python -m tools.mesh_evaluator `
-  --mesh <mesh.ply> `
-  --phase1 <phase1_out_dir> `
-  --output <mesh_metrics.json>
-```
-
-Or extract and evaluate directly from a CTGS PLY/training output:
-
-```powershell
-python -m tools.mesh_evaluator `
-  --input <train_out_dir> `
-  --phase1 <phase1_out_dir> `
-  --mesh-output <extracted_mesh.ply> `
-  --output <mesh_metrics.json>
-```
-
-The evaluator reports bidirectional distance metrics, symmetric
-Chamfer/Hausdorff, support-SDF outside ratio, and mesh component statistics.
-
-## Tests
-
-Run the regression suites with:
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-Run native CUDA parity checks explicitly when a GPU is available:
-
-```powershell
-$env:CTGS_RUN_CUDA_TESTS = "1"
-python -m unittest discover -s tests -p test_ct_native_backend.py -v
-```
+See [`LICENSE.md`](LICENSE.md).

@@ -10,7 +10,7 @@ from plyfile import PlyData, PlyElement
 from scipy.spatial import cKDTree
 
 from ct_pipeline.rendering.fields import query_ct_density
-from scene import CTGaussianModel
+from scene.ct_gaussian_model import CTGaussianModel
 from utils.rotation_utils import quaternion_to_matrix
 
 

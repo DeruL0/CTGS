@@ -8,7 +8,6 @@ from scipy import ndimage
 from scipy.spatial import cKDTree
 from torch import nn
 
-from ct_pipeline.data import CTPreprocessor
 from utils.rotation_utils import matrix_to_quaternion
 from .gaussian_model import GaussianModel
 
@@ -25,7 +24,6 @@ from .ct_bulk_initialization import (
     CT_DENSE_INIT_BULK_RADIUS_RATIO,
     CT_DENSE_INIT_SURFACE_MIN_SCALE_RATIO,
     CT_DENSE_INIT_SURFACE_POISSON_BASE_RATIO,
-    CT_DENSE_INIT_SURFACE_POISSON_CURVATURE_ALPHA,
     CT_DENSE_INIT_SURFACE_TANGENT_RATIO,
     CT_DENSE_INIT_SURFACE_THICKNESS_RATIO,
     CT_FEATURE_ADAPTIVE_BLUR_SIGMA_VOX,
@@ -116,7 +114,7 @@ class CTGaussianModel(GaussianModel):
         if signed_distance_volume is None:
             _material_mask = analysis.get("material_mask")
             if _material_mask is not None:
-                from ct_pipeline.data import build_support_signed_distance
+                from ct_pipeline.data.preprocessing import build_support_signed_distance
                 signed_distance_volume = build_support_signed_distance(
                     np.asarray(_material_mask, dtype=bool),
                     tuple(float(v) for v in spacing),
@@ -177,67 +175,6 @@ class CTGaussianModel(GaussianModel):
             feature_adaptive_probe_containment=feature_adaptive_probe_containment,
         )
 
-    def create_from_ct_volume(
-        self,
-        volume,
-        spacing,
-        analyzer,
-        spatial_lr_scale=1.0,
-        surface_thickness_max=None,
-        planar_thickness_max=None,
-        bulk_points_ratio: float = 1.0,
-        bulk_boundary_margin_voxels: int = 1,
-        support_threshold_mode: str = "otsu",
-        bulk_continuous_init=True,
-    ):
-        preprocessor = CTPreprocessor()
-        support = preprocessor.segment_coarse_support(volume, threshold_mode=support_threshold_mode)
-        support_mask = support["support_mask"]
-        if not np.any(support_mask):
-            raise ValueError("CT volume support extraction produced an empty solid mask.")
-
-        boundary_points = preprocessor.extract_intensity_surface_points(
-            volume,
-            support_mask,
-            spacing,
-        )
-        boundary_material_id = np.zeros((boundary_points.shape[0], 1), dtype=np.int64)
-        interior_target_count = max(1, int(round(boundary_points.shape[0] * float(bulk_points_ratio))))
-        interior_points, interior_density_seed, interior_material_id = preprocessor.sample_support_points(
-            support_mask,
-            volume,
-            spacing,
-            target_count=interior_target_count,
-            boundary_margin_voxels=bulk_boundary_margin_voxels,
-        )
-        boundary_normals, boundary_tangent_u, boundary_tangent_v, boundary_strength = analyzer.estimate_boundary_geometry(
-            boundary_points,
-            volume,
-            spacing,
-        )
-
-        from ct_pipeline.data import build_support_signed_distance
-        signed_distance_volume = build_support_signed_distance(support_mask, spacing)
-
-        self._create_from_analysis(
-            boundary_points=boundary_points,
-            boundary_normals=boundary_normals,
-            boundary_tangent_u=boundary_tangent_u,
-            boundary_tangent_v=boundary_tangent_v,
-            boundary_strength=boundary_strength,
-            spacing=spacing,
-            spatial_lr_scale=spatial_lr_scale,
-            surface_thickness_max=surface_thickness_max if surface_thickness_max is not None else planar_thickness_max,
-            material_id=boundary_material_id,
-            interior_points=interior_points,
-            interior_density_seed=interior_density_seed,
-            interior_material_id=interior_material_id,
-            bulk_continuous_init=bulk_continuous_init,
-            volume_shape_dhw=tuple(int(value) for value in support_mask.shape),
-            signed_distance_volume=signed_distance_volume,
-            material_mask_volume=support_mask,
-        )
-
     def clamp_surface_thickness(self, max_thickness: float):
         self.surface_thickness_max = float(max_thickness)
         self.planar_thickness_max = float(max_thickness)
@@ -254,9 +191,6 @@ class CTGaussianModel(GaussianModel):
         clamped = torch.clamp(scales, min=1e-8)
         new_scaling = self.scaling_inverse_activation(clamped)
         self._assign_parameter("_scaling", new_scaling, optimizer_name="scaling", requires_grad=True)
-
-    def clamp_planar_thickness(self, max_thickness: float):
-        self.clamp_surface_thickness(max_thickness)
 
     def get_normals(self) -> torch.Tensor:
         return super().get_normals()
@@ -430,7 +364,7 @@ class CTGaussianModel(GaussianModel):
                 _structure = ndimage.generate_binary_structure(3, 1)
                 _envelope = ndimage.binary_dilation(_mat_mask, structure=_structure, iterations=_dilate_vox)
                 # Build SDF from envelope for radius estimates, but preserve binary ownership from the envelope.
-                from ct_pipeline.data import build_support_signed_distance as _bssd
+                from ct_pipeline.data.preprocessing import build_support_signed_distance as _bssd
                 _envelope_sdf = _bssd(_envelope, tuple(float(v) for v in spacing))
                 _sdf_for_lattice = _envelope_sdf
                 _mask_for_lattice = _envelope

@@ -18,7 +18,7 @@ from ct_pipeline.rendering.slices import (
     render_ct_slice_world_patch,
 )
 from ct_pipeline.rendering.bulk_support import DEFAULT_BULK_QUERY_TRUNCATION_SIGMA
-from scene import CTGaussianModel
+from scene.ct_gaussian_model import CTGaussianModel
 
 
 BUFFER_FIELDS = {
@@ -246,14 +246,6 @@ class ViewerSession:
         payload["surface_count"] = int(self.surface_count)
         payload["bulk_count"] = int(self.bulk_count)
         return payload
-
-    def _render_state_for_layer(self, layer: str) -> CTRenderState:
-        normalized = _normalize_layer(layer)
-        if normalized == "surface":
-            return self.render_state_surface
-        if normalized == "bulk":
-            return self.render_state_bulk
-        return self.render_state_all
 
     def render_slice(
         self,

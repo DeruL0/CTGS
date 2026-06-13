@@ -13,7 +13,7 @@ from ct_pipeline.rendering.fields import query_ct_density
 from mesher import meshing_ct
 
 from ct_pipeline.runtime.acceleration import _prune_gaussian_like, clone_gaussian_like
-from ct_pipeline.runtime.compression import GSCompressor
+from ct_pipeline.runtime.compression import quantize_attributes
 
 
 def _dequantize(payload):
@@ -136,15 +136,12 @@ def _write_mesh_ply(path, vertices, faces, normals, material_id):
 
 
 class CTExporter:
-    def __init__(self):
-        self.compressor = GSCompressor()
-
     def export_display_gs(self, model, path, compress=True):
         export_model = _clone_for_export(model)
         if compress:
             keep_mask = _region_aware_keep_mask(export_model, surface_threshold=0.01, bulk_threshold_ratio=0.25)
             export_model = _prune_gaussian_like(export_model, keep_mask)
-            quantized = self.compressor.quantize_attributes(export_model, bits=8)
+            quantized = quantize_attributes(export_model, bits=8)
             _apply_quantized_attributes(export_model, quantized)
 
         export_path = Path(path)

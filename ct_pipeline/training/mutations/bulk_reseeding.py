@@ -12,28 +12,15 @@ from ct_pipeline.rendering.fields import (
     query_ct_fields_unified,
 )
 from ct_pipeline.training.mutations.bulk_completion import (
-    _append_bulk_completion_seeds,
     _apply_material_coverage_completion,
-    _material_completion_components,
 )
 from ct_pipeline.training.mutations.bulk_repair import (
-    _append_budgeted_repair_seeds,
     _apply_budgeted_component_bulk_repair,
-    _budgeted_repair_components,
-    _clearance_cap_candidate_scales,
-    _component_world_points,
-    _directional_clearance_one_side_torch,
-    _gaussian_density_np,
-    _probe_candidate_inside_material,
-    _sdf_inside_np,
 )
 from ct_pipeline.training.mutations.bulk_reseed_common import (
     _apply_material_limited_bulk_growth,
     _bulk_reseed_stats,
     _enforce_bulk_sdf_containment,
-    _mask_to_numpy_bool,
-    _sdf_to_numpy,
-    _voxel_indices_to_world,
 )
 from ct_pipeline.training.losses import sample_volume_field
 from ct_pipeline.training.mutations.helpers import (
@@ -755,26 +742,8 @@ def _apply_bulk_coverage_reseeding(
 
 
 __all__ = [
-    "_append_budgeted_repair_seeds",
-    "_append_bulk_completion_seeds",
-    "_apply_budgeted_component_bulk_repair",
     "_apply_bulk_coverage_reseeding",
     "_apply_gap_aware_bulk_reseeding",
-    "_apply_material_coverage_completion",
-    "_apply_material_limited_bulk_growth",
     "_apply_profile_integrated_bulk_reseeding",
-    "_budgeted_repair_components",
-    "_bulk_reseed_stats",
-    "_clearance_cap_candidate_scales",
-    "_component_world_points",
-    "_directional_clearance_one_side_torch",
-    "_enforce_bulk_sdf_containment",
-    "_gaussian_density_np",
-    "_mask_to_numpy_bool",
-    "_material_completion_components",
-    "_probe_candidate_inside_material",
     "_sample_gap_reseed_candidates",
-    "_sdf_inside_np",
-    "_sdf_to_numpy",
-    "_voxel_indices_to_world",
 ]

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import numpy as np
 import torch
@@ -136,7 +136,7 @@ def _query_ct_density_native_chunked(
     support_extent=None,
     chunk_points: int = 2048,
 ) -> torch.Tensor:
-    from ct_pipeline.backend import query_ct_density_native
+    from ct_pipeline.backend.query import query_ct_density_native
     from torch.utils.checkpoint import checkpoint
 
     def _query_chunk(
@@ -174,24 +174,6 @@ def _query_ct_density_native_chunked(
         else:
             chunks.append(_query_chunk(means, rotations, scales, opacity, chunk))
     return torch.cat(chunks, dim=0)
-
-
-def query_ct_density_from_state(
-    training_state,
-    points_xyz,
-):
-    means = training_state.xyz
-    points_xyz = _as_query_points(points_xyz, means.dtype, means.device)
-
-    return _query_ct_density_native_chunked(
-        means,
-        training_state.rotation_mats,
-        training_state.scales.clamp_min(1e-6),
-        training_state.opacity,
-        points_xyz,
-        spatial_grid=getattr(training_state, "spatial_grid", None),
-        support_extent=getattr(training_state, "support_extent", None),
-    )
 
 
 def query_ct_density_from_state_by_region(
@@ -389,12 +371,6 @@ def _config_optional_float(config, name: str, default):
     return None if value is None else float(value)
 
 
-def _config_bool(config, name: str, default: bool) -> bool:
-    if config is None:
-        return bool(default)
-    return bool(getattr(config, name, default))
-
-
 def _config_str(config, name: str, default: str) -> str:
     if config is None:
         return str(default)
@@ -479,7 +455,7 @@ def _query_density_with_q_cutoff(
     q_cut: float,
 ) -> torch.Tensor:
     if spatial_grid is not None and support_extent is not None and query_points.is_cuda:
-        from ct_pipeline.backend import has_ct_native_qcut_density_query, query_ct_density_qcut_native
+        from ct_pipeline.backend.query import has_ct_native_qcut_density_query, query_ct_density_qcut_native
 
         if has_ct_native_qcut_density_query():
             return query_ct_density_qcut_native(
@@ -586,7 +562,7 @@ def _query_bulk_intensity_field(
         membership_chunk: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if spatial_grid is not None and support_extent is not None and points_chunk.is_cuda:
-            from ct_pipeline.backend import has_ct_native_bulk_intensity_query, query_bulk_intensity_native
+            from ct_pipeline.backend.query import has_ct_native_bulk_intensity_query, query_bulk_intensity_native
 
             if has_ct_native_bulk_intensity_query():
                 return query_bulk_intensity_native(
@@ -704,7 +680,7 @@ def query_bulk_anisotropic_density(
         q_cut = resolve_bulk_containment_q(config)
         native_available = False
         if spatial_grid is not None and support_extent is not None and points_xyz.is_cuda:
-            from ct_pipeline.backend import has_ct_native_qcut_density_query
+            from ct_pipeline.backend.query import has_ct_native_qcut_density_query
 
             native_available = has_ct_native_qcut_density_query()
 
@@ -1176,111 +1152,6 @@ def query_ct_fields_unified(
         "I_hybrid_hard": i_hybrid_hard.to(dtype=dtype),
         "I_hybrid_soft": i_hybrid_soft.to(dtype=dtype),
     }
-
-
-def query_surface_fields(
-    points_xyz,
-    training_state,
-    signed_distance: torch.Tensor | None = None,
-    config=None,
-    *,
-    intensity_air: float = 0.0,
-    **kwargs,
-) -> dict[str, torch.Tensor]:
-    fields = query_ct_fields_unified(
-        points_xyz,
-        training_state,
-        signed_distance=signed_distance,
-        config=config,
-        intensity_air=intensity_air,
-        include_surface=True,
-        **kwargs,
-    )
-    return {
-        "W_s": fields["W_s"],
-        "A_s": fields["A_s"],
-        "M_s": fields["M_s"],
-        "I_s": fields["I_s"],
-        "occ_s_raw": fields["occ_s_raw"],
-        "occ_s": fields["occ_s"],
-        "g_s_geom": fields["g_s_geom"],
-        "g_s_mat": fields["g_s_mat"],
-        "den_s": fields["den_s"],
-    }
-
-
-def query_bulk_fields(
-    points_xyz,
-    training_state,
-    signed_distance: torch.Tensor | None = None,
-    config=None,
-    *,
-    intensity_air: float = 0.0,
-    **kwargs,
-) -> dict[str, torch.Tensor]:
-    fields = query_ct_fields_unified(
-        points_xyz,
-        training_state,
-        signed_distance=signed_distance,
-        config=config,
-        intensity_air=intensity_air,
-        include_surface=False,
-        **kwargs,
-    )
-    return {
-        "W_b": fields["W_b"],
-        "A_b": fields["A_b"],
-        "M_b": fields["M_b"],
-        "I_b": fields["I_b"],
-        "I_raw": fields["I_raw"],
-        "I_sdf_soft": fields["I_sdf_soft"],
-        "I_hard": fields["I_hard"],
-        "I_b_raw": fields["I_b_raw"],
-        "occ_b_raw": fields["occ_b_raw"],
-        "occ_b": fields["occ_b"],
-        "den_b": fields["den_b"],
-    }
-
-
-def render_ct_hybrid(
-    points_xyz,
-    training_state,
-    signed_distance: torch.Tensor | None = None,
-    config=None,
-    *,
-    mode: str = "hybrid_hard",
-    intensity_air: float = 0.0,
-    return_fields: bool = False,
-    **kwargs,
-):
-    fields = query_ct_fields_unified(
-        points_xyz,
-        training_state,
-        signed_distance=signed_distance,
-        config=config,
-        intensity_air=intensity_air,
-        include_surface=True,
-        **kwargs,
-    )
-    mode_to_key = {
-        "surface_only": "I_s",
-        "bulk_only": "I_b",
-        "raw_bulk": "I_raw",
-        "sdf_soft_display": "I_sdf_soft",
-        "hard_masked": "I_hard",
-        "hybrid_hard": "I_hybrid_hard",
-        "hybrid_soft": "I_hybrid_soft",
-        "unified": "I_pred",
-    }
-    if mode not in mode_to_key:
-        raise ValueError(
-            "mode must be one of {'surface_only', 'bulk_only', 'raw_bulk', "
-            "'sdf_soft_display', 'hard_masked', 'hybrid_hard', 'hybrid_soft', 'unified'}."
-        )
-    image = fields[mode_to_key[mode]]
-    if return_fields:
-        return image, fields
-    return image
 
 
 def signed_overlap_sdf_gates(

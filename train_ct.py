@@ -6,21 +6,17 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from ct_pipeline.config import extract_ct_model_args, extract_ct_optimization_args
+from ct_pipeline.config.model_args import extract_ct_model_args, extract_ct_optimization_args
 from ct_pipeline.rendering.bulk_support import resolve_bulk_query_truncation_sigma
-from ct_pipeline.backend import prepare_ct_training_state, require_ct_native_backend
-from ct_pipeline.training import (
-    CTGridCacheManager,
-    build_parser,
-    compute_ct_loss_terms,
-    prepare_ct_training_bootstrap,
-    validate_ct_training_args,
-)
+from ct_pipeline.backend.core import prepare_ct_training_state, require_ct_native_backend
+from ct_pipeline.training.bootstrap.setup import prepare_ct_training_bootstrap
+from ct_pipeline.training.config.parser import build_parser
+from ct_pipeline.training.config.validation import validate_ct_training_args
+from ct_pipeline.training.grid_cache import CTGridCacheManager
+from ct_pipeline.training.runtime import compute_ct_loss_terms
 from ct_pipeline.training.mutations.bulk_pruning import _apply_bulk_pruning
-from ct_pipeline.training.mutations.bulk_reseeding import (
-    _apply_bulk_coverage_reseeding,
-    _apply_material_coverage_completion,
-)
+from ct_pipeline.training.mutations.bulk_completion import _apply_material_coverage_completion
+from ct_pipeline.training.mutations.bulk_reseeding import _apply_bulk_coverage_reseeding
 from ct_pipeline.training.mutations.densification import _apply_ct_densification
 from ct_pipeline.training.mutations.helpers import (
     _apply_surface_scale_hard_projection,
@@ -35,15 +31,15 @@ from ct_pipeline.training.mutations.schedules import (
     _ct_should_reseed_surface,
 )
 from ct_pipeline.training.mutations.surface_reseeding import _apply_surface_reseeding
-from ct_pipeline.training.reporting import _compute_surface_drift_diagnostics, _save_surface_drift_diagnostics
+from ct_pipeline.training.reporting.surface_drift import _save_surface_drift_diagnostics
 from ct_pipeline.training.preview import _export_ct_outputs, _save_ct_middle_slice_preview
-from ct_pipeline.training.control import (
+from ct_pipeline.training.control.checkpoints import _save_ct_gaussians
+from ct_pipeline.training.control.optimizer import (
     _apply_bulk_atten_only_optimizer_mode,
     _attenuation_only_preview_early_stop_enabled,
     _bulk_attenuation_grad_stats,
     _restore_best_bulk_attenuation,
     _sanitize_xyz_parameter,
-    _save_ct_gaussians,
     maybe_apply_stage1_freeze,
 )
 from ct_pipeline.training.session import (

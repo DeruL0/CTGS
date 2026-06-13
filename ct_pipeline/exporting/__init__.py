@@ -1,5 +1,3 @@
-"""CT representation export helpers."""
+"""CT representation export package namespace."""
 
-from .exporter import CTExporter
-
-__all__ = ["CTExporter"]
+__all__: list[str] = []

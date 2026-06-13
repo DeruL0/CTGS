@@ -1,9 +1,3 @@
-"""Geometry analysis helpers shared by preprocessing and training."""
+"""Geometry helper package namespace."""
 
-from .analysis import GeometryAnalyzer
-from .curvature import compute_curvature_proxy_np
-
-__all__ = [
-    "GeometryAnalyzer",
-    "compute_curvature_proxy_np",
-]
+__all__: list[str] = []

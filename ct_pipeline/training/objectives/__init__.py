@@ -1,7 +1,3 @@
-from __future__ import annotations
+"""CT training objective package namespace."""
 
-from ct_pipeline.training.objectives.context import CTLossTerms
-
-__all__ = [
-    "CTLossTerms",
-]
+__all__: list[str] = []

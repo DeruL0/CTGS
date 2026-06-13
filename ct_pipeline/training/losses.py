@@ -18,63 +18,6 @@ def _as_slice_batch(tensor: torch.Tensor) -> torch.Tensor:
     raise ValueError("Slice tensors must have shape (H, W), (1, H, W), or (B, 1, H, W).")
 
 
-def _weighted_smooth_l1_loss(pred: torch.Tensor, target: torch.Tensor, weight_map, beta: float) -> torch.Tensor:
-    losses = F.smooth_l1_loss(pred, target, beta=float(beta), reduction="none")
-    if weight_map is None:
-        return losses.mean()
-
-    weight = _as_slice_batch(weight_map).to(device=pred.device, dtype=pred.dtype)
-    if weight.shape != losses.shape:
-        weight = torch.broadcast_to(weight, losses.shape)
-    return (losses * weight).sum() / weight.sum().clamp_min(1e-8)
-
-
-def binary_focal_loss(
-    pred_prob,
-    target,
-    *,
-    gamma: float = 2.0,
-    alpha: float | None = None,
-    sample_weights=None,
-    reduction: str = "mean",
-    eps: float = 1e-6,
-):
-    pred = torch.as_tensor(pred_prob)
-    if pred.numel() == 0:
-        return torch.zeros((), dtype=pred.dtype if torch.is_floating_point(pred) else torch.float32, device=pred.device)
-    if gamma < 0.0:
-        raise ValueError("gamma must be >= 0.")
-    if alpha is not None and (float(alpha) < 0.0 or float(alpha) > 1.0):
-        raise ValueError("alpha must be in [0, 1] when provided.")
-    if eps <= 0.0:
-        raise ValueError("eps must be > 0.")
-
-    pred = pred.reshape(-1).clamp(float(eps), 1.0 - float(eps))
-    target = torch.as_tensor(target, device=pred.device, dtype=pred.dtype).reshape(-1).clamp(0.0, 1.0)
-    if target.shape[0] != pred.shape[0]:
-        raise ValueError("target must match pred_prob length.")
-
-    p_t = pred * target + (1.0 - pred) * (1.0 - target)
-    loss = -torch.pow(1.0 - p_t, float(gamma)) * torch.log(p_t)
-    if alpha is not None:
-        alpha_t = float(alpha) * target + (1.0 - float(alpha)) * (1.0 - target)
-        loss = alpha_t * loss
-    if sample_weights is not None:
-        weights = torch.as_tensor(sample_weights, device=pred.device, dtype=pred.dtype).reshape(-1).clamp_min(0.0)
-        if weights.shape[0] != pred.shape[0]:
-            raise ValueError("sample_weights must match pred_prob length.")
-        loss = loss * weights
-        if reduction == "mean":
-            return loss.sum() / weights.sum().clamp_min(1e-8)
-    if reduction == "none":
-        return loss
-    if reduction == "sum":
-        return loss.sum()
-    if reduction == "mean":
-        return loss.mean()
-    raise ValueError("reduction must be one of {'none', 'sum', 'mean'}.")
-
-
 def asymmetric_binary_focal_loss(
     pred_prob,
     target,
@@ -178,61 +121,6 @@ def eagle_patch_loss(
     if not torch.any(high_mask):
         return spectrum.mean()
     return spectrum[..., high_mask].mean()
-
-
-def calibrated_render_huber_loss(
-    rendered_occupancy,
-    gt_slice,
-    intensity_air,
-    intensity_mat,
-    weight_map=None,
-    huber_beta: float = 0.1,
-):
-    if huber_beta <= 0.0:
-        raise ValueError("huber_beta must be > 0.")
-
-    occupancy = _as_slice_batch(rendered_occupancy).clamp(0.0, 1.0)
-    target = _as_slice_batch(gt_slice).to(device=occupancy.device, dtype=occupancy.dtype)
-    air = torch.as_tensor(intensity_air, device=occupancy.device, dtype=occupancy.dtype)
-    material = torch.as_tensor(intensity_mat, device=occupancy.device, dtype=occupancy.dtype)
-    calibrated = air + (material - air) * occupancy
-    weight = None if weight_map is None else _as_slice_batch(weight_map).to(device=occupancy.device, dtype=occupancy.dtype)
-    return _weighted_smooth_l1_loss(calibrated, target, weight, float(huber_beta))
-
-
-def soft_occupancy_loss(
-    pred_occupancy,
-    signed_distance,
-    tau=None,
-    huber_beta: float = 0.1,
-    sample_weights=None,
-    tau_voxels=None,
-):
-    pred = torch.as_tensor(pred_occupancy)
-    if pred.numel() == 0:
-        return torch.zeros((), dtype=pred.dtype if pred.numel() > 0 else torch.float32, device=pred.device)
-    if tau is None:
-        tau = tau_voxels
-    if tau is None:
-        raise ValueError("tau must be provided.")
-    if tau <= 0.0:
-        raise ValueError("tau must be > 0.")
-    if huber_beta <= 0.0:
-        raise ValueError("huber_beta must be > 0.")
-
-    pred = pred.reshape(-1).clamp(0.0, 1.0)
-    distance = torch.as_tensor(signed_distance, device=pred.device, dtype=pred.dtype).reshape(-1)
-    if distance.shape[0] != pred.shape[0]:
-        raise ValueError("signed_distance must match pred_occupancy length.")
-    target = torch.sigmoid(-distance / float(tau))
-    losses = F.smooth_l1_loss(pred, target, beta=float(huber_beta), reduction="none")
-    if sample_weights is None:
-        return losses.mean()
-    weights = torch.as_tensor(sample_weights, device=pred.device, dtype=pred.dtype).reshape(-1)
-    if weights.shape[0] != pred.shape[0]:
-        raise ValueError("sample_weights must match pred_occupancy length.")
-    weights = weights.clamp_min(0.0)
-    return (losses * weights).sum() / weights.sum().clamp_min(1e-8)
 
 
 def sample_volume_field(volume_field: torch.Tensor, points_xyz: torch.Tensor, spacing_zyx):

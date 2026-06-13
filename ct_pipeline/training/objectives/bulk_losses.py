@@ -11,7 +11,8 @@ from ct_pipeline.rendering.fields import (
     query_ct_density_from_state_by_region,
     query_ct_fields_unified,
 )
-from ct_pipeline.training.bootstrap import CTTrainingBootstrap, _sample_coarse_sdf_normals
+from ct_pipeline.training.bootstrap.analysis import _sample_coarse_sdf_normals
+from ct_pipeline.training.bootstrap.context import CTTrainingBootstrap
 from ct_pipeline.training.losses import asymmetric_binary_focal_loss, sample_volume_field
 from ct_pipeline.training.objectives.modes import (
     _dual_separated_training_enabled,

@@ -73,10 +73,6 @@ def has_ct_native_backend() -> bool:
     return _CT_NATIVE_C is not None
 
 
-def get_ct_native_backend_error() -> Exception | None:
-    return _CT_NATIVE_IMPORT_ERROR
-
-
 def get_ct_native_extension():
     if _CT_NATIVE_C is None:
         raise RuntimeError("ct_native_backend is unavailable.")

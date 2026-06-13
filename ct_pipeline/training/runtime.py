@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn.functional as F
 
-from ct_pipeline.training.bootstrap import CTTrainingBootstrap
+from ct_pipeline.training.bootstrap.context import CTTrainingBootstrap
 from ct_pipeline.training.losses import sample_volume_field
-from ct_pipeline.training.objectives import CTLossTerms
 from ct_pipeline.training.objectives.bulk_losses import (
     _bulk_scale_adaptive_cap_loss,
     bulk_coverage_growth_loss,
@@ -47,6 +48,17 @@ from ct_pipeline.training.sampling import (
     sample_bulk_volume_points_excluding_boundary,
     sample_surface_boundary_points,
 )
+
+
+@dataclass
+class CTLossTerms:
+    volume: torch.Tensor
+    occupancy: torch.Tensor
+    surface: torch.Tensor
+
+    @property
+    def render(self) -> torch.Tensor:
+        return self.volume
 
 
 def compute_ct_loss_terms(context: CTTrainingBootstrap, args, training_state, iteration: int = 0) -> CTLossTerms:

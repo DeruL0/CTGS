@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from ct_pipeline.data import CTVolumeLoader
-from scene import CTGaussianModel
+from ct_pipeline.data.loader import CTVolumeLoader
+from scene.ct_gaussian_model import CTGaussianModel
 
 
 @dataclass

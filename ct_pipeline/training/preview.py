@@ -6,8 +6,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ct_pipeline.backend import prepare_ct_training_state, render_ct_slice_patch_native
-from ct_pipeline.exporting import CTExporter
+from ct_pipeline.backend.core import prepare_ct_training_state
+from ct_pipeline.backend.render import render_ct_slice_patch_native
+from ct_pipeline.exporting.exporter import CTExporter
 from ct_pipeline.rendering.bulk_support import resolve_bulk_query_truncation_sigma
 from ct_pipeline.rendering.fields import bulk_intensity_readout, is_bulk_intensity_field_mode, query_ct_fields_unified
 from ct_pipeline.rendering.slices import _build_query_points_from_base, sample_gt_slice_patch

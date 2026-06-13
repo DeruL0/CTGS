@@ -7,8 +7,8 @@ import numpy as np
 import torch
 from scipy import ndimage
 
-from ct_pipeline.data import build_support_signed_distance
-from ct_pipeline.geometry import compute_curvature_proxy_np
+from ct_pipeline.data.preprocessing import build_support_signed_distance
+from ct_pipeline.geometry.curvature import compute_curvature_proxy_np
 from ct_pipeline.training.losses import sample_sdf_normals, sample_volume_field
 from ct_pipeline.training.utils import as_device_tensor
 

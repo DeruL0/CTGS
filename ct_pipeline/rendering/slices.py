@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import importlib.util
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -10,11 +8,6 @@ from utils.rotation_utils import quaternion_to_matrix
 
 
 _AXIS_MAP = {"z": 0, "y": 1, "x": 2, 0: 0, 1: 1, 2: 2}
-_AXIS_RENDER_CONFIG = {
-    0: {"plane_axis": 2, "dim_h": 1, "dim_w": 0},
-    1: {"plane_axis": 1, "dim_h": 2, "dim_w": 0},
-    2: {"plane_axis": 0, "dim_h": 2, "dim_w": 1},
-}
 _WORLD_AXIS_MAP = {"x": 0, "y": 1, "z": 2}
 _WORLD_AXIS_RENDER_CONFIG = {
     0: {"plane_axis": 0, "dim_h": 2, "dim_w": 1},
@@ -262,72 +255,6 @@ def _resolve_render_state(render_source) -> CTRenderState:
     return prepare_ct_render_state(render_source)
 
 
-def _is_compile_fallback_error(exc: Exception) -> bool:
-    exc_type_name = type(exc).__name__.lower()
-    exc_message = str(exc).lower()
-    return any(
-        token in exc_type_name or token in exc_message
-        for token in (
-            "tritonmissing",
-            "backendcompilerfailed",
-            "inductor",
-            "triton",
-        )
-    )
-
-
-def _has_triton_support() -> bool:
-    return importlib.util.find_spec("triton") is not None
-
-
-def render_ct_slice_patch(
-    render_source,
-    axis,
-    slice_idx,
-    patch_origin_hw,
-    patch_size_hw,
-    spacing_zyx,
-    volume_shape_dhw,
-    gaussians_per_chunk: int = 2048,
-    patch_grid_cache: Optional[CTPatchGridCache] = None,
-    render_impl: Optional[Callable[..., torch.Tensor]] = None,
-    slice_tile_size: int = 8,
-):
-    del slice_tile_size
-    axis_index = _normalize_axis(axis)
-    slice_shape_hw = _slice_shape(volume_shape_dhw, axis_index)
-    patch_origin_hw, patch_size_hw = _normalize_patch_parameters(patch_origin_hw, patch_size_hw, slice_shape_hw)
-    patch_height, patch_width = patch_size_hw
-
-    render_state = _resolve_render_state(render_source)
-    if render_state.means.numel() == 0:
-        return torch.zeros((patch_height, patch_width), dtype=torch.float32, device=render_state.device)
-
-    patch_grid_cache = patch_grid_cache if patch_grid_cache is not None else CTPatchGridCache()
-    rr, cc = patch_grid_cache.get(patch_size_hw, render_state.device, render_state.dtype)
-    query_points = _build_query_points_from_base(rr, cc, axis_index, slice_idx, patch_origin_hw, spacing_zyx)
-    axis_cfg = _AXIS_RENDER_CONFIG[axis_index]
-    slice_coord = query_points[0, axis_cfg["plane_axis"]]
-
-    render_impl = render_impl or _render_ct_slice_patch_impl
-    patch_values = render_impl(
-        query_points,
-        slice_coord,
-        render_state.means,
-        render_state.rotations,
-        render_state.scales,
-        render_state.opacity,
-        render_state.radius,
-        axis_cfg["plane_axis"],
-        axis_cfg["dim_h"],
-        axis_cfg["dim_w"],
-        float(spacing_zyx[axis_index]),
-        int(gaussians_per_chunk),
-    )
-
-    return patch_values.reshape(patch_height, patch_width).clamp_(0.0, 1.0)
-
-
 def render_ct_slice_world_patch(
     render_source,
     axis,
@@ -384,34 +311,6 @@ def render_ct_slice_world_patch(
     if output_mode == "occupancy":
         return (1.0 - torch.exp(-density_values.clamp_min(0.0))).clamp_(0.0, 1.0)
     raise ValueError("output_mode must be one of {'occupancy', 'density'}.")
-
-
-def build_ct_patch_renderer(compile_renderer: bool = False) -> Callable[..., torch.Tensor]:
-    eager_impl: Callable[..., torch.Tensor] = _render_ct_slice_patch_impl
-    compiled_impl: Optional[Callable[..., torch.Tensor]] = None
-    if compile_renderer and hasattr(torch, "compile") and _has_triton_support():
-        try:
-            compiled_impl = torch.compile(_render_ct_slice_patch_impl, dynamic=True, fullgraph=False)
-        except Exception:
-            compiled_impl = None
-
-    compile_enabled = {"value": compiled_impl is not None}
-
-    def _renderer(*args, **kwargs):
-        if compile_enabled["value"]:
-            try:
-                kwargs.setdefault("render_impl", compiled_impl)
-                return render_ct_slice_patch(*args, **kwargs)
-            except Exception as exc:
-                if not _is_compile_fallback_error(exc):
-                    raise
-                compile_enabled["value"] = False
-                kwargs.pop("render_impl", None)
-
-        kwargs.setdefault("render_impl", eager_impl)
-        return render_ct_slice_patch(*args, **kwargs)
-
-    return _renderer
 
 
 def sample_gt_slice_patch(volume, axis, slice_idx, patch_origin_hw, patch_size_hw):

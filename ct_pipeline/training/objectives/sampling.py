@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from ct_pipeline.training.bootstrap import CTTrainingBootstrap
+from ct_pipeline.training.bootstrap.context import CTTrainingBootstrap
 from ct_pipeline.training.sampling import (
     _cached_or_filter_candidates,
     _candidate_count,

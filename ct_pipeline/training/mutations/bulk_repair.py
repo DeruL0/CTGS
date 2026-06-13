@@ -239,43 +239,6 @@ def _directional_clearance_sides_torch(
     return clearances
 
 
-def _directional_clearance_one_side_torch(
-    center,
-    direction,
-    signed_distance_field: dict,
-    device,
-    max_distance: float,
-    step_distance: float,
-) -> float:
-    max_distance = float(max(max_distance, 0.0))
-    if max_distance <= 0.0:
-        return 0.0
-    center_np = np.asarray(center, dtype=np.float32).reshape(3)
-    direction_np = np.asarray(direction, dtype=np.float32).reshape(3)
-    direction_norm = float(np.linalg.norm(direction_np))
-    if direction_norm <= 1e-8:
-        return 0.0
-    direction_np = direction_np / direction_norm
-    step_distance = max(float(step_distance), 1e-6)
-    steps = max(1, int(math.ceil(max_distance / step_distance)))
-    distances = np.linspace(step_distance, max_distance, steps, dtype=np.float32)
-    probes = center_np.reshape(1, 3) + distances.reshape(-1, 1) * direction_np.reshape(1, 3)
-    inside = _sdf_inside_np(probes, signed_distance_field, device)
-    outside = np.nonzero(~inside)[0]
-    if outside.size == 0:
-        return max_distance
-    high = float(distances[int(outside[0])])
-    low = 0.0 if int(outside[0]) == 0 else float(distances[int(outside[0]) - 1])
-    for _ in range(5):
-        mid = 0.5 * (low + high)
-        mid_point = center_np + mid * direction_np
-        if bool(_sdf_inside_np(mid_point.reshape(1, 3), signed_distance_field, device)[0]):
-            low = mid
-        else:
-            high = mid
-    return low
-
-
 def _clearance_cap_candidate_scales(
     center,
     desired_scales,

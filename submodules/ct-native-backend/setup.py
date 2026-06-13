@@ -21,7 +21,6 @@ setup(
                 "local_query.cu",
                 "query_density.cu",
                 "render_slice_patch.cu",
-                "signed_field.cu",
                 "surface_regularization.cpp",
                 "uniform_grid.cu",
             ],
